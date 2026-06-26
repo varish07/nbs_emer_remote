@@ -1,0 +1,47 @@
+{
+  "summary": "Iteration 2 testing: backend mock OTP, block/unblock/report, active users, avatar size/type validation all work. Avatar upload to Emergent object storage fails with upstream 500. Frontend: login mock OTP hint, all 5 bottom nav items, Active page (search + list + user-menu), Map (Leaflet renders with tiles), Profile (avatar input/button, support button, no destination field), 3-dot menu (Block/Report), Report modal (5 reasons + submit) all work. Bottom nav right edge is still overlapped by 'Made with Emergent' badge - intercepts click on nav-profile despite pr-10.",
+  "tested_scope": ["backend", "frontend", "integration"],
+  "passed": [
+    "POST /api/auth/send-otp returns mock_otp=123456, mock:true",
+    "POST /api/block rejects self (400 Cannot block yourself)",
+    "POST /api/block returns {success:true}; second call returns already_blocked:true",
+    "GET /api/block/list returns blocked user (User2222)",
+    "Blocked user disappears from /api/users/nearby and /api/users/active",
+    "POST /api/requests/send to blocked user returns 403 'Cannot send to a blocked user'",
+    "POST /api/chat/send to blocked user returns 403 'User blocked'",
+    "POST /api/unblock removes block; user reappears in /nearby",
+    "POST /api/report rejects self (400); valid report returns report_id",
+    "/api/users/active returns all active users with distance_m, sorted by distance, no radius filter",
+    "Avatar upload rejects non-image (400 'File must be an image')",
+    "Avatar upload rejects >5MB (400 'Image too large')",
+    "GET /api/files/{missing} returns 404 JSON (not HTML)",
+    "Frontend Login: shows 123456 demo OTP hint badge when mock:true",
+    "Frontend Bottom nav data-testids present: nav-discover, nav-active, nav-map, nav-requests, nav-profile",
+    "Frontend /active: active-search-input, active-list, user-menu-{id} (2 users)",
+    "Frontend /map: map-container + .leaflet-container + 6 leaflet tiles render",
+    "Frontend /profile: avatar-file-input, upload-avatar-button, open-support-button present; NO destination field (placeholder/text)",
+    "Frontend 3-dot menu opens with Block user + Report user options",
+    "Frontend Report modal: 5 reason options + report-submit button"
+  ],
+  "failed": [
+    {
+      "area": "backend / object-storage integration",
+      "issue": "POST /api/users/me/avatar returns 500 Internal Server Error. Upstream Emergent object storage PUT https://integrations.emergentagent.com/objstore/api/v1/storage/objects/nbs/avatars/.../*.png responds 500. put_object() calls resp.raise_for_status() which surfaces as 500 to the client; user.avatar never persists.",
+      "evidence": "curl POST /api/users/me/avatar with valid 1x1 PNG → 'Internal Server Error'. backend.err.log shows requests.exceptions.HTTPError: 500 Server Error from integrations.emergentagent.com/objstore. /api/users/me.avatar remains null.",
+      "priority": "HIGH"
+    },
+    {
+      "area": "frontend / MobileShell layout",
+      "issue": "'Made with Emergent' badge in bottom-right still overlaps the right edge of the bottom nav, intercepting pointer events on nav-profile (and likely nav-requests). pr-10 padding on the nav row is insufficient on 390px viewport.",
+      "evidence": "Playwright click on [data-testid=\"nav-profile\"] timed out 7s with error 'Made with Emergent badge subtree intercepts pointer events'. Screenshots show bottom nav rendering only Discover/Active/Map visible above the badge.",
+      "priority": "HIGH"
+    }
+  ],
+  "action_items": [
+    "Investigate Emergent object storage 500 on PUT /objects/{path}. Either (a) verify EMERGENT_LLM_KEY/storage init succeeds, (b) check request format/content-type, or (c) catch upstream error and return a clearer 502/503 instead of 500. Avatar upload is currently unusable end-to-end.",
+    "Increase bottom-nav right padding (e.g. pr-20 or pr-24) or move the Made-with-Emergent badge above/away from the nav so nav-profile and nav-requests are clickable on a 390px viewport. The badge currently intercepts pointer events."
+  ],
+  "success_rate": {"backend": "92%", "frontend": "90%"},
+  "retest_needed": true,
+  "full_testing_deferred": true
+}

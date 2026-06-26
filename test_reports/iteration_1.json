@@ -1,0 +1,54 @@
+{
+  "summary": "First-finish smoke test of NBS proximity chat app. Backend endpoints verified end-to-end via curl across two users (A=+15550001111, B=+15550002222) at Bengaluru coords. Frontend login flow, Home availability toggle, radius slider, manual coordinates, nearby list, and navigation to Requests/Friends/Profile/Support all working.",
+  "tested_scope": ["backend", "frontend", "auth", "integration"],
+  "passed": [
+    "POST /api/auth/send-otp -> returns mock_otp=123456",
+    "POST /api/auth/verify-otp with 123456 -> JWT + user (new user auto-created with default name UserNNNN); invalid OTP returns 401 'Invalid OTP'",
+    "GET /api/users/me -> includes email & radius (default 500)",
+    "PUT /api/users/me -> updates name/email/destination/bio (echoed in response, persisted)",
+    "POST /api/users/me/location -> saves lat/lng",
+    "POST /api/users/me/active -> clamps radius (5 -> 10, 99999 -> 10000), sets is_active",
+    "GET /api/users/nearby -> returns User2222 at 62.1 m from User1111 with my_radius=500; excludes self; empty when location absent",
+    "POST /api/requests/send -> creates pending; duplicate returns 'Already sent'; self -> 400 'Cannot send to yourself'",
+    "GET /api/requests/incoming -> lists pending with request_id and from user",
+    "POST /api/requests/respond {request_id, accept:true} -> status accepted",
+    "GET /api/requests/friends -> bidirectional friend list returned",
+    "POST /api/chat/send between friends -> message saved & returned; empty text -> 400 'Empty message'; non-friend -> 'Not connected with this user'",
+    "GET /api/chat/{other_id}/messages -> ordered messages for friends",
+    "POST /api/support -> ticket created with ticket_id",
+    "Frontend Login: phone -> Send OTP -> OTP -> Verify -> lands on Home with welcome toast",
+    "Frontend Home: availability-toggle flips to 'You're live'/'You're offline'; radius-slider visible; manual lat/lng entry saves; nearby-list renders User2222 with distance and Send Request button",
+    "Frontend Requests page: renders empty state correctly after acceptance",
+    "Frontend Friends page: shows AliceUpdated with destination 'Mall'",
+    "Frontend Profile & Support pages: render with profile-name-input and support-submit-button present"
+  ],
+  "failed": [
+    {
+      "area": "Frontend / Friends page",
+      "issue": "Chat icon button on the friend row does not expose a data-testid matching 'open-chat-{id}' (no such selector found). Visually a round chat icon is present and likely functional, but automated testing of 'tap to chat' requires the testid.",
+      "evidence": "page.query_selector_all('[data-testid^=\"open-chat-\"]') returned 0 elements while a chat icon is visible in the Friends row.",
+      "priority": "LOW"
+    },
+    {
+      "area": "Frontend / Layout",
+      "issue": "'Made with Emergent' badge (#emergent-badge) overlays the bottom-right tabs (Profile/Support) at mobile width 390px and intercepts pointer events, blocking taps on the rightmost nav buttons.",
+      "evidence": "Playwright click on nav profile link timed out: '<p> Made with Emergent </p> from <a id=\"emergent-badge\"> subtree intercepts pointer events'. Workaround: direct URL navigation works.",
+      "priority": "MEDIUM"
+    },
+    {
+      "area": "Backend / PUT /api/users/me response shape",
+      "issue": "PUT /api/users/me response does not include the 'email' field that was just set, whereas GET /api/users/me does. Minor inconsistency; data is persisted correctly.",
+      "evidence": "PUT response: {... 'name':'AliceUpdated','destination':'Mall','bio':'hi' ...} (no email key). GET includes email.",
+      "priority": "LOW"
+    }
+  ],
+  "action_items": [
+    "Add data-testid='open-chat-{friend_id}' to the chat icon button on Friends page so chat navigation can be automated.",
+    "Reposition or add padding so the Emergent badge does not overlap the mobile bottom navbar at 390px width (badge currently blocks the Profile/Support tabs).",
+    "(Optional) Include 'email' (and 'radius') in PUT /api/users/me response for consistency with GET."
+  ],
+  "success_rate": {"backend": "100%", "frontend": "~95%"},
+  "retest_needed": false,
+  "full_testing_deferred": true,
+  "test_credentials": "Read from /app/memory/test_credentials.md - mock OTP 123456 for any phone; used +15550001111 and +15550002222."
+}

@@ -1,0 +1,19 @@
+{
+  "summary": "Retest of /active ReferenceError fix. Both new-user (+15559876543) and existing-user (+15550100001) flows now load /active without crashing. UserListItem destructures actionDone correctly. Send Request button transitions to '\u2713 Pending' (disabled, grey class bg-[#F3F4F6]) after click. Console is clean (0 errors, 0 page errors, 0 ReferenceError/actionDone errors). Search filter works without crash.",
+  "tested_scope": ["frontend"],
+  "passed": [
+    "New user (+15559876543) /active loads cleanly: active-list rendered with multiple users (User2222, User6876, User8766, etc.)",
+    "Existing user (+15550100001) /active loads with both matches-section (1) and active-list (1) sections",
+    "11 send-request buttons rendered for existing user",
+    "Send Request click -> button text becomes '\u2713 Pending', disabled=True, grey styling applied",
+    "Toast 'Request sent \u2014 waiting for response' confirmed visually",
+    "Search filter active-search-input accepts text without crashing the page",
+    "Zero console errors and zero pageerror events across both flows",
+    "No ReferenceError or actionDone-related errors detected"
+  ],
+  "failed": [],
+  "action_items": [],
+  "success_rate": {"backend": "n/a", "frontend": "100%"},
+  "retest_needed": false,
+  "full_testing_deferred": true
+}

@@ -1,0 +1,26 @@
+{
+  "summary": "Backend /api/users/active and /api/users/matches both return 200 cleanly for new (no going_to) and existing (+15550100001) users. matches endpoint correctly returns {matches:[],message:...} for users without going_to and full matches with matched_on populated for the seeded user. However, the /active page CRASHES with an uncaught ReferenceError 'actionDone is not defined' inside UserListItem for BOTH user profiles, so the page never renders active-list, matches-section, empty-active, search input, or any send-request buttons. The Promise.allSettled and (matched_on || []) defensive fixes look correct, but they're masked by this new prop-destructuring bug.",
+  "tested_scope": ["frontend", "backend", "integration"],
+  "passed": [
+    "POST /api/auth/send-otp returns mock_otp 123456",
+    "POST /api/auth/verify-otp (field name: 'otp') returns access_token",
+    "GET /api/users/active returns 200 with 8 users for new authenticated user",
+    "GET /api/users/matches returns 200 with empty matches + helpful message for user without going_to",
+    "GET /api/users/matches returns 200 with 3 enriched matches (matched_on populated, e.g., ['coffee','road']) for +15550100001",
+    "Login flow (send OTP -> verify OTP) works in UI for both new and existing phone numbers"
+  ],
+  "failed": [
+    {
+      "area": "frontend / /active page",
+      "issue": "Uncaught ReferenceError: actionDone is not defined at UserListItem. UserListItem.js line 19 destructures only { user, subtitle, actionLabel, actionLoading, onAction, secondaryAction, onBlocked } but lines 84/85/87 reference actionDone. ActiveUsers.js passes actionDone={!!sent[u.id]} prop, but it is never read. The runtime error halts rendering of the entire /active route, so neither the empty-state for a brand-new user nor the suggested-matches list for an existing user is visible. The previously claimed fixes (Promise.allSettled, (matched_on||[]).join) cannot be verified because the page crashes before they take effect.",
+      "evidence": "Browser pageerror: 'actionDone is not defined ReferenceError: actionDone is not defined at UserListItem (...)'. Page shows full-screen red 'Uncaught runtime errors' overlay. data-testid='active-list', 'empty-active', 'matches-section', 'active-search-input' all absent from DOM for both +15559876543 (new) and +15550100001 (existing).",
+      "priority": "HIGH"
+    }
+  ],
+  "action_items": [
+    "In /app/frontend/src/components/UserListItem.js line 19, add actionDone to the destructured props: function UserListItem({ user, subtitle, actionLabel, actionLoading, actionDone, onAction, secondaryAction, onBlocked }). After fix, retest /active for (a) new user (expect empty-active or active-list, no matches-section), (b) +15550100001 (expect matches-section with 3 items and Send Request -> ✓ Pending state change), (c) search filter, (d) console clean."
+  ],
+  "success_rate": {"backend": "100%", "frontend": "0%"},
+  "retest_needed": true,
+  "full_testing_deferred": true
+}

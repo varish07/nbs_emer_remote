@@ -1,0 +1,48 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Manrope:wght@400;500;600;700&display=swap');
+
+body {
+  font-family: 'Manrope', system-ui, -apple-system, sans-serif;
+  background: #f7f7f9;
+  color: #222222;
+}
+
+h1, h2, h3, h4, .font-display {
+  font-family: 'Outfit', 'Manrope', sans-serif;
+  letter-spacing: -0.01em;
+}
+
+.App {
+  min-height: 100vh;
+}
+
+/* Hide scrollbar but keep functional */
+.scroll-clean::-webkit-scrollbar { width: 4px; }
+.scroll-clean::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 2px; }
+
+/* Pulse online dot */
+@keyframes nbs-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(49, 162, 76, 0.55); }
+  50% { box-shadow: 0 0 0 6px rgba(49, 162, 76, 0); }
+}
+.online-dot {
+  animation: nbs-pulse 1.8s ease-in-out infinite;
+}
+
+/* Subtle page-in */
+@keyframes nbs-slide-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.page-in { animation: nbs-slide-in .35s ease-out both; }
+
+/* Chat bubble tails */
+.bubble-me {
+  background: #FF385C;
+  color: #fff;
+  border-radius: 18px 18px 4px 18px;
+}
+.bubble-them {
+  background: #F3F4F6;
+  color: #222;
+  border-radius: 18px 18px 18px 4px;
+}

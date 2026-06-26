@@ -1,0 +1,134 @@
+{
+  "project_name": "NBS",
+  "app_type": "mobile_web_app",
+  "domain": "Proximity-based Social & Chat",
+  "theme": "light",
+  "archetype": "Archetype 3 (Pastel & Soft) blended with Archetype 1 (Organic & Earthy), aligned with Airbnb's clean, modern design aesthetic.",
+  "colors": {
+    "primary": {
+      "DEFAULT": "#FF385C",
+      "hover": "#E31C5F",
+      "active": "#D70466",
+      "light": "#FFEBEE"
+    },
+    "secondary": {
+      "DEFAULT": "#00A699",
+      "hover": "#008489",
+      "light": "#E0F2F1"
+    },
+    "neutral": {
+      "background": "#FFFFFF",
+      "surface": "#F7F7F9",
+      "surface_hover": "#F3F4F6",
+      "border": "#EBEBEB",
+      "text_main": "#222222",
+      "text_muted": "#717171"
+    },
+    "semantic": {
+      "success": "#00A699",
+      "warning": "#FFB400",
+      "error": "#C13515",
+      "online": "#31A24C"
+    }
+  },
+  "typography": {
+    "heading_font": "Outfit",
+    "body_font": "Manrope",
+    "scale": {
+      "h1": "text-4xl sm:text-5xl tracking-tight font-bold text-[#222222]",
+      "h2": "text-2xl sm:text-3xl tracking-tight font-semibold text-[#222222]",
+      "h3": "text-xl font-medium text-[#222222]",
+      "body": "text-base leading-relaxed text-[#717171]",
+      "small": "text-sm text-[#717171]",
+      "overline": "text-xs uppercase tracking-[0.2em] font-bold text-[#717171]"
+    }
+  },
+  "spacing_and_layout": {
+    "philosophy": "Mobile-first layout. Use full viewport height. Maintain generous touch targets and optical alignment.",
+    "container_padding": "px-4 sm:px-6 py-6 sm:py-8",
+    "card_radius": "rounded-2xl sm:rounded-3xl",
+    "button_radius": "rounded-xl",
+    "borders": "1px solid #EBEBEB"
+  },
+  "motion_and_interaction": {
+    "buttons": "transition-transform active:scale-95 duration-200",
+    "cards": "hover:bg-[#F7F7F9] transition-colors duration-200",
+    "page_transition": "animate-in slide-in-from-bottom-2 fade-in duration-300",
+    "loading": "skeleton screens with pulse animation"
+  },
+  "components_instructions": {
+    "global_navigation": {
+      "type": "Bottom Navigation Bar",
+      "style": "Fixed bottom, bg-white/90 backdrop-blur-xl border-t border-[#EBEBEB] pb-safe pt-2",
+      "active_state": "Text and icon colored #FF385C"
+    },
+    "otp_login": {
+      "layout": "Centered content, massive number input field, sticky bottom CTA button.",
+      "style": "Input field: text-3xl tracking-widest text-center. No side borders, just a thick bottom border that turns #FF385C on focus."
+    },
+    "availability_toggle": {
+      "layout": "Prominent sticky header or top card on the Home view.",
+      "style": "Neumorphic/Tactile pill toggle. When ON: bg-[#FF385C] text-white shadow-lg. When OFF: bg-[#F3F4F6] text-[#717171]."
+    },
+    "radius_slider": {
+      "layout": "Card located under the availability toggle.",
+      "style": "Custom Shadcn Slider (10m to 10km). Track: #EBEBEB, Range: #FF385C, Thumb: White with shadow-md border-2 border-[#FF385C]."
+    },
+    "user_list_card": {
+      "layout": "Flex row, avatar on left, details in middle, action on right. Padding p-4, bg-white, border-b border-[#EBEBEB].",
+      "details": "Name (text-lg font-bold), Distance (text-sm text-[#717171] with MapPin icon).",
+      "online_indicator": "Absolute positioned 12px green (#31A24C) dot with 2px white border on bottom right of avatar.",
+      "action_button": "Small rounded-full button. 'Send Request' in #FF385C text, bg-white, border border-[#FF385C]."
+    },
+    "chat_interface": {
+      "layout": "Standard chat bubbles. Sender: bg-[#FF385C] text-white rounded-br-none. Receiver: bg-[#F3F4F6] text-[#222222] rounded-bl-none.",
+      "input": "Fixed bottom input area, rounded-full bg-[#F3F4F6] with send icon button inside."
+    }
+  },
+  "icons_and_assets": {
+    "library": "lucide-react",
+    "stroke_width": 2,
+    "image_urls": [
+      {
+        "category": "onboarding_map_visual",
+        "url": "https://images.pexels.com/photos/7634433/pexels-photo-7634433.jpeg",
+        "description": "Cork world map pieces, minimalist geometry for login/onboarding background"
+      },
+      {
+        "category": "avatar_placeholder_1",
+        "url": "https://images.pexels.com/photos/35899966/pexels-photo-35899966.jpeg",
+        "description": "Smiling woman looking sideways"
+      },
+      {
+        "category": "avatar_placeholder_2",
+        "url": "https://images.unsplash.com/photo-1562124638-724e13052daf?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMzN8MHwxfHNlYXJjaHwxfHxwcm9maWxlJTIwcG9ydHJhaXQlMjBzbWlsaW5nfGVufDB8fHx8MTc4MjQxODc2Mnww&ixlib=rb-4.1.0&q=85",
+        "description": "Smiling man in black top"
+      },
+      {
+        "category": "avatar_placeholder_3",
+        "url": "https://images.pexels.com/photos/28998413/pexels-photo-28998413.jpeg",
+        "description": "Smiling woman profile portrait"
+      },
+      {
+        "category": "support_header_bg",
+        "url": "https://images.pexels.com/photos/7682476/pexels-photo-7682476.jpeg",
+        "description": "Two colleagues with headsets for Support/Contact page header"
+      }
+    ]
+  },
+  "testing_requirements": {
+    "attribute": "data-testid",
+    "convention": "kebab-case, role-based",
+    "examples": ["otp-input-field", "login-submit-button", "availability-toggle", "radius-slider", "send-request-button", "chat-input-field"]
+  },
+  "instructions_to_main_agent": [
+    "Initialize standard mobile-first layout using JavaScript (.js or .jsx) files.",
+    "Wrap everything in a `max-w-md mx-auto min-h-screen relative bg-white` container if viewed on desktop, simulating a mobile device.",
+    "Use Lucide-React for all icons (MapPin, User, MessageCircle, Settings, ToggleLeft/Right, Slider).",
+    "Do NOT use pure #000000 for text; use the defined #222222.",
+    "For the Map View (optional), use a simple grey placeholder block or a stylized static map image, unless integrating a real map library like react-map-gl.",
+    "Ensure the 'availability toggle' is highly visible and uses the primary Coral color when active.",
+    "Always apply 'data-testid' to actionable elements.",
+    "Build the UI without heavy Shadcn 'Card' wrappers. Use raw div with bg-white border-b for list items to keep the clean Airbnb list style."
+  ]
+}

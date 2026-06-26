@@ -1,0 +1,31 @@
+{
+  "summary": "Retested fixes from iteration 2. Avatar upload (POST /api/users/me/avatar) and file serving (GET /api/files/{path}) now work end-to-end (retry-on-5xx logic verified). Backend smoke (OTP, profile, location/active, /users/active, /users/nearby) all green. However, the bottom-nav clickability fix (pr-24 padding) is INSUFFICIENT: the 'Made with Emergent' badge measures 178px wide (x=196->374 on 390px viewport), but pr-24 only reserves 96px. nav-requests and nav-profile remain occluded by the badge and are NOT clickable.",
+  "tested_scope": ["backend", "frontend", "integration"],
+  "passed": [
+    "POST /api/auth/send-otp + verify-otp (mock OTP 123456) -> JWT issued",
+    "POST /api/users/me/avatar with PNG -> 200 {success:true, avatar:/api/files/...}; retry logic appears to be working (no 500/403 observed across multiple uploads)",
+    "GET /api/files/{path} -> 200 image/png (75 bytes for 2x2 PNG)",
+    "POST /api/users/me/location -> 200",
+    "POST /api/users/me/active (radius=1000) -> 200",
+    "GET /api/users/active and /api/users/nearby return active users with correct distance_m (User2222 at 62.1m within Bengaluru seed coords)",
+    "Profile page has NO destination field (count=0)",
+    "File <input type='file'> exists on profile; avatar upload via UI succeeded (no error banner after upload)",
+    "Frontend loads on 390px viewport; login flow works; home shows nearby user list"
+  ],
+  "failed": [
+    {
+      "area": "Frontend / MobileShell bottom nav",
+      "issue": "Emergent badge still intercepts pointer events on nav-requests and nav-profile at 390px viewport. Playwright reports: '<p>Made with Emergent</p> from <a id=emergent-badge> subtree intercepts pointer events'. document.elementFromPoint(center of nav-profile) returns the badge <p>, not the <a data-testid=nav-profile>.",
+      "evidence": "Measured rects on 390px viewport: emergent-badge x=196->374 (width 178px, bottom-right). nav-requests x=173->233 (center 203, INSIDE badge). nav-profile x=243->289 (fully INSIDE badge). pr-24 reserves only 96px of right padding but badge is 178px wide. Playwright click on [data-testid='nav-profile'] times out after 4s with pointer interception.",
+      "priority": "HIGH"
+    }
+  ],
+  "action_items": [
+    "MobileShell.js line 38: increase right padding so the nav row clears the 178px-wide Emergent badge. pr-24 (96px) is too small. Try pr-44 (~176px) or pr-48 (192px), OR move the badge above the nav, OR reduce nav to 3 items + overflow menu. Verify with document.elementFromPoint at the center of each nav item on 390px viewport (expected: the <a data-testid='nav-*'> ancestor, not the badge).",
+    "Note: the badge width may include the 'Made with Emergent' text + check icon + padding; measure post-fix on the actual deployed site since CSS may differ."
+  ],
+  "success_rate": {"backend": "100%", "frontend": "60%"},
+  "retest_needed": true,
+  "full_testing_deferred": true,
+  "test_credentials": "Loaded from /app/memory/test_credentials.md (mock OTP=123456). Used phone +15550012345 (new user User2345) as instructed."
+}
