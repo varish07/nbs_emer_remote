@@ -15,10 +15,12 @@ export default function Login() {
   const nav = useNavigate();
 
   const sendOtp = async () => {
-    if (phone.length < 6) return toast.error("Please enter a valid phone number");
+    const digits = phone.replace(/\D/g, "");
+    if (digits.length < 6) return toast.error("Please enter a valid phone number");
+    const e164 = `+${digits}`;
     setLoading(true);
     try {
-      const { data } = await api.post("/auth/send-otp", { phone });
+      const { data } = await api.post("/auth/send-otp", { phone: e164 });
       setMockOtp(data.mock_otp || "");
       setStep("otp");
       toast.success(data.mock ? "OTP sent! (Demo: use 123456)" : "OTP sent via SMS");
@@ -29,9 +31,11 @@ export default function Login() {
 
   const verifyOtp = async () => {
     if (otp.length < 4) return toast.error("Enter the 6-digit OTP");
+    const digits = phone.replace(/\D/g, "");
+    const e164 = `+${digits}`;
     setLoading(true);
     try {
-      const { data } = await api.post("/auth/verify-otp", { phone, otp });
+      const { data } = await api.post("/auth/verify-otp", { phone: e164, otp });
       login(data.token, data.user);
       toast.success("Welcome to NBS");
       nav("/", { replace: true });
@@ -66,16 +70,18 @@ export default function Login() {
                 <label className="text-xs uppercase tracking-[0.18em] text-[#717171] font-bold">Mobile number</label>
                 <div className="mt-2 flex items-center border-b-2 border-[#EBEBEB] focus-within:border-[#FF385C] transition-colors">
                   <Phone size={18} className="text-[#717171] mr-3" />
+                  <span className="text-xl text-[#222] font-medium select-none" data-testid="login-phone-prefix">+</span>
                   <input
                     data-testid="login-phone-input"
                     type="tel"
-                    inputMode="numeric"
+                    inputMode="tel"
                     value={phone}
-                    onChange={(e) => setPhone(e.target.value.replace(/[^\d+]/g, ""))}
-                    placeholder="+91 98765 43210"
-                    className="flex-1 py-3 text-xl tracking-wide outline-none bg-transparent text-[#222]"
+                    onChange={(e) => setPhone(e.target.value.replace(/\D/g, ""))}
+                    placeholder="91 98765 43210"
+                    className="flex-1 py-3 pl-1 text-xl tracking-wide outline-none bg-transparent text-[#222]"
                   />
                 </div>
+                <p className="text-[10px] text-[#717171] mt-2">Include country code (e.g. 91 for India, 1 for US).</p>
               </div>
               <button
                 data-testid="login-send-otp-button"
@@ -91,7 +97,7 @@ export default function Login() {
             <div className="space-y-6">
               <div>
                 <h2 className="font-display text-2xl font-semibold text-[#222]">Enter verification code</h2>
-                <p className="text-sm text-[#717171] mt-1">Sent to <span className="text-[#222] font-medium">{phone}</span></p>
+                <p className="text-sm text-[#717171] mt-1">Sent to <span className="text-[#222] font-medium">+{phone}</span></p>
                 {mockOtp && (
                   <div className="mt-3 inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#FFEBEE] text-[#C13515] text-xs font-medium" data-testid="mock-otp-hint">
                     <ShieldCheck size={14} /> Demo OTP: {mockOtp}
