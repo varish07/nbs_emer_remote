@@ -34,7 +34,7 @@ export default function MobileShell({ children }) {
       <div className="max-w-md mx-auto min-h-screen bg-white relative shadow-sm">
         <div className="pb-24">{children}</div>
         <nav className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md bg-white/95 backdrop-blur-xl border-t border-[#EBEBEB] z-30">
-          <ul className="flex items-center pt-2 pb-3 pr-40 pl-2 gap-1">
+          <ul className="flex items-center pt-2 pb-3 px-2 gap-1">
             {nav.map(({ to, label, icon: Icon, testid, badge }) => {
               const active = loc.pathname === to;
               return (

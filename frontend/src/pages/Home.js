@@ -176,7 +176,58 @@ export default function Home() {
 
       {/* Availability card */}
       <div className="mx-5 mt-2 rounded-3xl border border-[#EBEBEB] p-5 bg-white">
-        <div className="flex items-start justify-between gap-4">
+        {/* Location */}
+        <div>
+          <p className="text-xs uppercase tracking-[0.18em] text-[#717171] font-bold mb-2">Location</p>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-sm">
+              <MapPin size={16} className="text-[#717171]" />
+              <span className="text-[#222] font-medium">
+                {coords ? `${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}` : "No location set"}
+              </span>
+            </div>
+            <button
+              data-testid="use-current-location-button"
+              onClick={requestLocation}
+              className="text-xs font-semibold text-[#FF385C] hover:text-[#E31C5F] flex items-center gap-1 px-2 py-1"
+            >
+              {locStatus === "requesting" ? <Loader2 className="animate-spin" size={14} /> : <Crosshair size={14} />}
+              Use current
+            </button>
+          </div>
+          <button
+            data-testid="toggle-manual-location"
+            onClick={() => setManualOpen((v) => !v)}
+            className="text-xs text-[#717171] hover:text-[#222] underline mt-2"
+          >
+            {manualOpen ? "Hide manual entry" : "Enter coordinates manually"}
+          </button>
+          {manualOpen && (
+            <div className="mt-3 flex items-center gap-2">
+              <input
+                data-testid="manual-lat-input"
+                value={manualLat}
+                onChange={(e) => setManualLat(e.target.value)}
+                placeholder="Lat"
+                className="flex-1 border border-[#EBEBEB] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#FF385C]"
+              />
+              <input
+                data-testid="manual-lng-input"
+                value={manualLng}
+                onChange={(e) => setManualLng(e.target.value)}
+                placeholder="Lng"
+                className="flex-1 border border-[#EBEBEB] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#FF385C]"
+              />
+              <button
+                data-testid="save-manual-location"
+                onClick={submitManual}
+                className="bg-[#222] text-white text-sm rounded-lg px-3 py-2"
+              >Set</button>
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-start justify-between gap-4 mt-5 pt-4 border-t border-[#EBEBEB]">
           <div>
             <p className="text-xs uppercase tracking-[0.18em] text-[#717171] font-bold">Visibility</p>
             <p className="font-display text-xl font-semibold mt-1 text-[#222]">{isActive ? "You're live" : "You're offline"}</p>
@@ -233,56 +284,6 @@ export default function Home() {
             >Save</button>
           </div>
           <p className="text-[10px] text-[#717171] mt-1.5">Visible to active users in your area.</p>
-        </div>
-
-        {/* Location */}
-        <div className="mt-5 pt-4 border-t border-[#EBEBEB]">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-sm">
-              <MapPin size={16} className="text-[#717171]" />
-              <span className="text-[#222] font-medium">
-                {coords ? `${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}` : "No location set"}
-              </span>
-            </div>
-            <button
-              data-testid="use-current-location-button"
-              onClick={requestLocation}
-              className="text-xs font-semibold text-[#FF385C] hover:text-[#E31C5F] flex items-center gap-1 px-2 py-1"
-            >
-              {locStatus === "requesting" ? <Loader2 className="animate-spin" size={14} /> : <Crosshair size={14} />}
-              Use current
-            </button>
-          </div>
-          <button
-            data-testid="toggle-manual-location"
-            onClick={() => setManualOpen((v) => !v)}
-            className="text-xs text-[#717171] hover:text-[#222] underline mt-2"
-          >
-            {manualOpen ? "Hide manual entry" : "Enter coordinates manually"}
-          </button>
-          {manualOpen && (
-            <div className="mt-3 flex items-center gap-2">
-              <input
-                data-testid="manual-lat-input"
-                value={manualLat}
-                onChange={(e) => setManualLat(e.target.value)}
-                placeholder="Lat"
-                className="flex-1 border border-[#EBEBEB] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#FF385C]"
-              />
-              <input
-                data-testid="manual-lng-input"
-                value={manualLng}
-                onChange={(e) => setManualLng(e.target.value)}
-                placeholder="Lng"
-                className="flex-1 border border-[#EBEBEB] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#FF385C]"
-              />
-              <button
-                data-testid="save-manual-location"
-                onClick={submitManual}
-                className="bg-[#222] text-white text-sm rounded-lg px-3 py-2"
-              >Set</button>
-            </div>
-          )}
         </div>
       </div>
 
