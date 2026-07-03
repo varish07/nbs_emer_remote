@@ -768,6 +768,68 @@ async def admin_get_chat_messages(chat_key: str, user=Depends(require_admin)):
     return {"messages": msgs, "users": users_map, "count": len(msgs)}
 
 
+@api_router.delete("/admin/messages/{message_id}")
+async def admin_delete_message(message_id: str, user=Depends(require_admin)):
+    res = await db.messages.delete_one({"id": message_id})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Message not found")
+    return {"success": True}
+
+
+@api_router.get("/admin/chats/{chat_key}/export")
+async def admin_export_chat_csv(chat_key: str, user=Depends(require_admin)):
+    import csv, io
+    cursor = db.messages.find({"chat_key": chat_key}, {"_id": 0}).sort("created_at", 1)
+    msgs = await cursor.to_list(5000)
+    users_cache = {}
+    async def name_of(uid):
+        if uid not in users_cache:
+            u = await db.users.find_one({"id": uid}, {"_id": 0})
+            users_cache[uid] = (u or {}).get("name", uid)
+        return users_cache[uid]
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["created_at", "from_user", "from_user_id", "to_user", "to_user_id", "text"])
+    for m in msgs:
+        w.writerow([
+            m.get("created_at"),
+            await name_of(m.get("from_user_id")),
+            m.get("from_user_id"),
+            await name_of(m.get("to_user_id")),
+            m.get("to_user_id"),
+            m.get("text", ""),
+        ])
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="chat-{chat_key.replace("|","_")}.csv"'},
+    )
+
+
+@api_router.get("/admin/blocks")
+async def admin_list_blocks(user=Depends(require_admin)):
+    out = []
+    async for b in db.blocks.find({}, {"_id": 0}).sort("created_at", -1).limit(500):
+        blocker = await db.users.find_one({"id": b["blocker_id"]}, {"_id": 0})
+        blocked = await db.users.find_one({"id": b["blocked_id"]}, {"_id": 0})
+        out.append({
+            "id": b["id"],
+            "created_at": b.get("created_at"),
+            "blocker": public_user(blocker) if blocker else {"id": b["blocker_id"], "name": "?"},
+            "blocked": public_user(blocked) if blocked else {"id": b["blocked_id"], "name": "?"},
+        })
+    return {"blocks": out}
+
+
+@api_router.get("/admin/support")
+async def admin_list_support(user=Depends(require_admin)):
+    out = []
+    async for t in db.support_tickets.find({}, {"_id": 0}).sort("created_at", -1).limit(500):
+        author = await db.users.find_one({"id": t.get("user_id")}, {"_id": 0})
+        out.append({**t, "author": public_user(author) if author else None})
+    return {"tickets": out}
+
+
 # ============= Support =============
 
 @api_router.post("/support")
