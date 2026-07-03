@@ -134,9 +134,6 @@ export default function Profile() {
         <Field label="Home location (optional, where you stay)">
           <input data-testid="profile-home-location-input" {...fld("home_location")} placeholder="e.g. Bengaluru, India" className="w-full px-4 py-3 rounded-xl border border-[#EBEBEB] focus:border-[#FF385C] outline-none" />
         </Field>
-        <Field label="Where are you headed? (shown to others)">
-          <input data-testid="profile-going-to-input" {...fld("going_to")} placeholder="e.g. Coffee at MG Road, Cubbon Park, Mall…" className="w-full px-4 py-3 rounded-xl border border-[#EBEBEB] focus:border-[#FF385C] outline-none" />
-        </Field>
         <Field label="Short bio">
           <textarea data-testid="profile-bio-input" {...fld("bio")} rows={3} className="w-full px-4 py-3 rounded-xl border border-[#EBEBEB] focus:border-[#FF385C] outline-none resize-none" />
         </Field>
@@ -181,14 +178,6 @@ export default function Profile() {
             <Users size={16} /> Admin Dashboard
           </button>
         )}
-
-        <button
-          data-testid="open-friends-button"
-          onClick={() => window.location.assign("/friends")}
-          className="w-full border border-[#EBEBEB] hover:bg-[#F7F7F9] text-[#222] rounded-xl py-3 font-semibold flex items-center justify-center gap-2"
-        >
-          <Users size={16} /> My Friends
-        </button>
 
         <button
           data-testid="open-support-button"
