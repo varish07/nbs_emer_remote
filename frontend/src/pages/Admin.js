@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
-import { Loader2, Flag, Users, MessageCircle, Ban, CheckCircle2, AlertTriangle, X, ArrowLeft, Trash2, Download, ShieldOff, LifeBuoy } from "lucide-react";
+import { Loader2, Flag, Users, MessageCircle, Ban, CheckCircle2, AlertTriangle, X, ArrowLeft, Trash2, Download, ShieldOff, LifeBuoy, Database } from "lucide-react";
 
 function Stat({ label, value, icon: Icon }) {
   return (
@@ -139,6 +139,25 @@ export default function Admin() {
     } catch { toast.error("Export failed"); }
   };
 
+  const [backupBusy, setBackupBusy] = useState(false);
+  const downloadFullBackup = async () => {
+    setBackupBusy(true);
+    try {
+      const res = await api.get("/admin/backup", { responseType: "blob" });
+      const url = window.URL.createObjectURL(new Blob([res.data], { type: "application/zip" }));
+      const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `nbs-backup-${ts}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      toast.success("Backup downloaded");
+    } catch (e) { toast.error(e.response?.data?.detail || "Backup failed"); }
+    finally { setBackupBusy(false); }
+  };
+
   const resolve = async (id, action) => {
     setBusy(true);
     try {
@@ -190,6 +209,18 @@ export default function Admin() {
           <Stat label="Messages" value={stats.messages} icon={MessageCircle} />
         </div>
       )}
+
+      <div className="px-5 mt-3">
+        <button
+          data-testid="admin-download-backup"
+          onClick={downloadFullBackup}
+          disabled={backupBusy}
+          className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border border-[#EBEBEB] hover:bg-[#F7F7F9] text-sm font-semibold text-[#222] disabled:opacity-60"
+        >
+          {backupBusy ? <Loader2 size={16} className="animate-spin" /> : <Database size={16} />}
+          Download full DB backup (.zip)
+        </button>
+      </div>
 
       <div className="px-5 mt-5 flex gap-2 border-b border-[#EBEBEB] overflow-x-auto">
         {TABS.map((t) => (

@@ -830,6 +830,28 @@ async def admin_list_support(user=Depends(require_admin)):
     return {"tickets": out}
 
 
+@api_router.get("/admin/backup")
+async def admin_full_backup(user=Depends(require_admin)):
+    """Downloads a ZIP with every collection as pretty-printed JSON."""
+    import io, zipfile, json as _json
+    collections = ["users", "messages", "friend_requests", "otps", "reports", "blocks", "support_tickets", "files"]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        summary = {"db": os.environ.get("DB_NAME"), "generated_at": now_iso(), "counts": {}}
+        for c in collections:
+            docs = await db[c].find({}, {"_id": 0}).to_list(100000)
+            summary["counts"][c] = len(docs)
+            zf.writestr(f"{c}.json", _json.dumps(docs, indent=2, default=str))
+        zf.writestr("_summary.json", _json.dumps(summary, indent=2))
+    buf.seek(0)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="nbs-backup-{ts}.zip"'},
+    )
+
+
 # ============= Support =============
 
 @api_router.post("/support")
