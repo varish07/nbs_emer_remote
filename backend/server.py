@@ -723,6 +723,51 @@ async def admin_ban_user(user_id: str, banned: bool = True, user=Depends(require
     return {"success": True, "is_banned": banned}
 
 
+@api_router.get("/admin/chats")
+async def admin_list_chats(user=Depends(require_admin)):
+    """List all unique chat pairs with last-message preview and count."""
+    pipeline = [
+        {"$sort": {"created_at": -1}},
+        {"$group": {
+            "_id": "$chat_key",
+            "last_message": {"$first": "$text"},
+            "last_from": {"$first": "$from_user_id"},
+            "last_at": {"$first": "$created_at"},
+            "count": {"$sum": 1},
+        }},
+        {"$sort": {"last_at": -1}},
+        {"$limit": 200},
+    ]
+    chats = []
+    async for row in db.messages.aggregate(pipeline):
+        parts = row["_id"].split("|")
+        u1 = await db.users.find_one({"id": parts[0]}, {"_id": 0}) if len(parts) > 0 else None
+        u2 = await db.users.find_one({"id": parts[1]}, {"_id": 0}) if len(parts) > 1 else None
+        chats.append({
+            "chat_key": row["_id"],
+            "participants": [public_user(u1) if u1 else None, public_user(u2) if u2 else None],
+            "last_message": row["last_message"],
+            "last_from": row["last_from"],
+            "last_at": row["last_at"],
+            "count": row["count"],
+        })
+    return {"chats": chats}
+
+
+@api_router.get("/admin/chats/{chat_key}/messages")
+async def admin_get_chat_messages(chat_key: str, user=Depends(require_admin)):
+    """Get full message history for a specific chat_key."""
+    cursor = db.messages.find({"chat_key": chat_key}, {"_id": 0}).sort("created_at", 1)
+    msgs = await cursor.to_list(2000)
+    parts = chat_key.split("|")
+    users_map = {}
+    for pid in parts:
+        u = await db.users.find_one({"id": pid}, {"_id": 0})
+        if u:
+            users_map[pid] = public_user(u)
+    return {"messages": msgs, "users": users_map, "count": len(msgs)}
+
+
 # ============= Support =============
 
 @api_router.post("/support")
