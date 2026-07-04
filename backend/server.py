@@ -912,6 +912,47 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     init_storage()
+    await ensure_indexes()
+
+
+async def ensure_indexes():
+    """Create indexes for hot query paths. Idempotent — safe to run every boot."""
+    try:
+        # users: lookups by id (everywhere) and phone (auth), plus filter on is_active
+        await db.users.create_index("id", unique=True)
+        await db.users.create_index("phone", unique=True)
+        await db.users.create_index("is_active")
+
+        # otps: keyed by phone (upserted on send-otp)
+        await db.otps.create_index("phone", unique=True)
+
+        # friend_requests: multiple hot lookups
+        await db.friend_requests.create_index("id", unique=True)
+        await db.friend_requests.create_index([("from_user_id", 1), ("to_user_id", 1), ("status", 1)])
+        await db.friend_requests.create_index([("to_user_id", 1), ("status", 1)])
+        await db.friend_requests.create_index([("from_user_id", 1), ("status", 1)])
+
+        # messages: fetched by chat_key, sorted by created_at
+        await db.messages.create_index("id", unique=True)
+        await db.messages.create_index([("chat_key", 1), ("created_at", 1)])
+        await db.messages.create_index("created_at")  # for admin recent-messages
+
+        # blocks: both directions queried
+        await db.blocks.create_index([("blocker_id", 1), ("blocked_id", 1)], unique=True)
+        await db.blocks.create_index("blocked_id")
+
+        # reports: admin listing sorted by created_at, filtered by status
+        await db.reports.create_index([("status", 1), ("created_at", -1)])
+
+        # files: served by storage_path with is_deleted filter
+        await db.files.create_index([("storage_path", 1), ("is_deleted", 1)])
+
+        # support_tickets: admin listing sorted by created_at
+        await db.support_tickets.create_index("created_at")
+
+        logger.info("MongoDB indexes ensured")
+    except Exception as e:
+        logger.error(f"ensure_indexes failed: {e}")
 
 
 @app.on_event("shutdown")
