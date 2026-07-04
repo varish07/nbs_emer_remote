@@ -25,6 +25,11 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     (async () => {
       setLoading(true);
+      // If we're returning from Google OAuth, let AuthCallback handle the exchange first
+      if (window.location.hash?.includes("session_id=")) {
+        setLoading(false);
+        return;
+      }
       if (token) await fetchMe();
       setLoading(false);
     })();

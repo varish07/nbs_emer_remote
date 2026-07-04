@@ -126,6 +126,9 @@ class VerifyOtpRequest(BaseModel):
     phone: str = Field(..., min_length=6, max_length=20)
     otp: str = Field(..., min_length=4, max_length=8)
 
+class GoogleAuthExchangeRequest(BaseModel):
+    session_id: str = Field(..., min_length=8, max_length=200)
+
 class UpdateProfileRequest(BaseModel):
     name: Optional[str] = Field(None, max_length=60)
     email: Optional[str] = Field(None, max_length=120)
@@ -466,6 +469,73 @@ async def verify_otp(req: VerifyOtpRequest, request: Request):
         await db.users.insert_one(user.copy())
     token = create_token(user["id"])
     user.pop("_id", None)
+    return {"token": token, "user": public_user(user)}
+
+
+EMERGENT_AUTH_SESSION_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
+
+
+@api_router.post("/auth/google/exchange")
+async def google_auth_exchange(req: GoogleAuthExchangeRequest, request: Request):
+    """Exchange an Emergent OAuth session_id for our JWT.
+    REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH"""
+    ip = client_ip(request)
+    if not await rate_limit(f"gauth:ip:{ip}", 20, OTP_SEND_WINDOW):
+        raise HTTPException(status_code=429, detail="Too many auth attempts. Try again later.")
+
+    try:
+        resp = requests.get(
+            EMERGENT_AUTH_SESSION_URL,
+            headers={"X-Session-ID": req.session_id},
+            timeout=15,
+        )
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Emergent auth call failed: {e}")
+        raise HTTPException(status_code=502, detail="Auth provider unreachable")
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid or expired Google session")
+
+    data = resp.json()
+    email = (data.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Google session missing email")
+
+    name = data.get("name") or email.split("@")[0]
+    picture = data.get("picture")
+
+    # Upsert by email
+    user = await db.users.find_one({"email": email}, {"_id": 0})
+    if not user:
+        user = {
+            "id": str(uuid.uuid4()),
+            "phone": None,
+            "email": email,
+            "name": name,
+            "avatar": picture,
+            "bio": None,
+            "is_active": False,
+            "radius": 100,
+            "location": None,
+            "auth_provider": "google",
+            "created_at": now_iso(),
+        }
+        await db.users.insert_one(user.copy())
+    else:
+        # Refresh Google profile fields if user hasn't customized them
+        updates = {}
+        if not user.get("name") or user.get("name", "").startswith("User"):
+            updates["name"] = name
+        if not user.get("avatar") and picture:
+            updates["avatar"] = picture
+        if updates:
+            await db.users.update_one({"id": user["id"]}, {"$set": updates})
+            user.update(updates)
+
+    if user.get("is_banned"):
+        raise HTTPException(status_code=403, detail="Account suspended")
+
+    token = create_token(user["id"])
     return {"token": token, "user": public_user(user)}
 
 
@@ -1122,9 +1192,15 @@ async def startup():
 async def ensure_indexes():
     """Create indexes for hot query paths. Idempotent — safe to run every boot."""
     try:
-        # users: lookups by id (everywhere) and phone (auth), plus filter on is_active
+        # users: lookups by id (everywhere) and phone/email (auth), plus filter on is_active
         await db.users.create_index("id", unique=True)
-        await db.users.create_index("phone", unique=True)
+        # Drop the old non-sparse phone index if it exists, then create sparse-unique
+        try:
+            await db.users.drop_index("phone_1")
+        except Exception:
+            pass
+        await db.users.create_index("phone", unique=True, sparse=True)
+        await db.users.create_index("email", unique=True, sparse=True)
         await db.users.create_index("is_active")
 
         # otps: keyed by phone (upserted on send-otp); TTL index auto-expires records
