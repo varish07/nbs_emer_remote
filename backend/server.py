@@ -257,6 +257,23 @@ async def get_blocked_ids(user_id: str) -> set:
     return out
 
 
+async def get_friend_ids(user_id: str) -> set:
+    """Set of accepted-friend user IDs. Cached in Redis; invalidated on request accept/block."""
+    cache_key = f"friend_ids:{user_id}"
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return set(cached)
+    out = set()
+    async for r in db.friend_requests.find(
+        {"$or": [{"from_user_id": user_id}, {"to_user_id": user_id}], "status": "accepted"},
+        {"_id": 0, "from_user_id": 1, "to_user_id": 1},
+    ):
+        other = r["to_user_id"] if r["from_user_id"] == user_id else r["from_user_id"]
+        out.add(other)
+    await cache_set(cache_key, list(out), CACHE_TTL_FRIENDS)
+    return out
+
+
 # ============= Object Storage =============
 
 def init_storage():
@@ -652,6 +669,7 @@ async def get_nearby(user=Depends(get_current_user)):
     radius = me.get("radius", 100)
     my_loc = me["location"]
     blocked = await get_blocked_ids(user["id"])
+    friends = await get_friend_ids(user["id"])
 
     cursor = db.users.find({
         "id": {"$ne": me["id"], "$nin": list(blocked)},
@@ -666,7 +684,13 @@ async def get_nearby(user=Depends(get_current_user)):
             continue
         d = haversine_m(my_loc["lat"], my_loc["lng"], loc["lat"], loc["lng"])
         if d <= radius:
-            nearby.append({**public_user(u), "distance_m": round(d, 1), "location": grid_location(loc)})
+            is_friend = u["id"] in friends
+            nearby.append({
+                **public_user(u),
+                "distance_m": round(d, 1),
+                "location": loc if is_friend else grid_location(loc),
+                "is_friend": is_friend,
+            })
     nearby.sort(key=lambda x: x["distance_m"])
     return {"users": nearby, "my_radius": radius}
 
@@ -674,6 +698,7 @@ async def get_nearby(user=Depends(get_current_user)):
 async def get_all_active(user=Depends(get_current_user)):
     me = await db.users.find_one({"id": user["id"]}, {"_id": 0})
     blocked = await get_blocked_ids(user["id"])
+    friends = await get_friend_ids(user["id"])
     my_loc = me.get("location") if me else None
 
     cursor = db.users.find({
@@ -685,7 +710,9 @@ async def get_all_active(user=Depends(get_current_user)):
     async for u in cursor:
         item = public_user(u)
         loc = u.get("location")
-        item["location"] = grid_location(loc)
+        is_friend = u["id"] in friends
+        item["location"] = (loc if is_friend else grid_location(loc)) if loc else None
+        item["is_friend"] = is_friend
         if my_loc and loc:
             item["distance_m"] = round(haversine_m(my_loc["lat"], my_loc["lng"], loc["lat"], loc["lng"]), 1)
         else:
@@ -721,7 +748,7 @@ async def send_request(req: FriendRequestCreate, user=Depends(get_current_user))
     })
     if reverse:
         await db.friend_requests.update_one({"id": reverse["id"]}, {"$set": {"status": "accepted", "responded_at": now_iso()}})
-        await cache_del(f"friends:{user['id']}", f"friends:{req.to_user_id}")
+        await cache_del(f"friends:{user['id']}", f"friends:{req.to_user_id}", f"friend_ids:{user['id']}", f"friend_ids:{req.to_user_id}")
         return {"success": True, "status": "accepted", "auto_matched": True}
     rid = str(uuid.uuid4())
     doc = {
@@ -783,7 +810,7 @@ async def respond_request(req: FriendRequestRespond, user=Depends(get_current_us
     new_status = "accepted" if req.accept else "rejected"
     await db.friend_requests.update_one({"id": req.request_id}, {"$set": {"status": new_status, "responded_at": now_iso()}})
     if req.accept:
-        await cache_del(f"friends:{user['id']}", f"friends:{r['from_user_id']}")
+        await cache_del(f"friends:{user['id']}", f"friends:{r['from_user_id']}", f"friend_ids:{user['id']}", f"friend_ids:{r['from_user_id']}")
     await manager.send_to(r["from_user_id"], {"type": "request_response", "status": new_status, "from_user_id": user["id"]})
     return {"success": True, "status": new_status}
 
@@ -863,13 +890,13 @@ async def block_user(req: BlockRequest, user=Depends(get_current_user)):
         "blocked_id": req.user_id,
         "created_at": now_iso(),
     })
-    await cache_del(f"blocks:{user['id']}", f"blocks:{req.user_id}", f"friends:{user['id']}", f"friends:{req.user_id}")
+    await cache_del(f"blocks:{user['id']}", f"blocks:{req.user_id}", f"friends:{user['id']}", f"friends:{req.user_id}", f"friend_ids:{user['id']}", f"friend_ids:{req.user_id}")
     return {"success": True}
 
 @api_router.post("/unblock")
 async def unblock_user(req: BlockRequest, user=Depends(get_current_user)):
     await db.blocks.delete_one({"blocker_id": user["id"], "blocked_id": req.user_id})
-    await cache_del(f"blocks:{user['id']}", f"blocks:{req.user_id}", f"friends:{user['id']}", f"friends:{req.user_id}")
+    await cache_del(f"blocks:{user['id']}", f"blocks:{req.user_id}", f"friends:{user['id']}", f"friends:{req.user_id}", f"friend_ids:{user['id']}", f"friend_ids:{req.user_id}")
     return {"success": True}
 
 @api_router.get("/block/list")
@@ -911,6 +938,7 @@ async def get_matches(user=Depends(get_current_user)):
     if not my_words:
         return {"matches": []}
     blocked = await get_blocked_ids(user["id"])
+    friends = await get_friend_ids(user["id"])
     out = []
     async for u in db.users.find({"id": {"$ne": user["id"], "$nin": list(blocked)}, "is_active": True}, {"_id": 0}):
         their_going = (u.get("going_to") or "").lower().strip()
@@ -922,7 +950,10 @@ async def get_matches(user=Depends(get_current_user)):
             item = public_user(u)
             item["match_score"] = len(overlap)
             item["matched_on"] = list(overlap)
-            item["location"] = grid_location(u.get("location"))
+            is_friend = u["id"] in friends
+            loc = u.get("location")
+            item["location"] = (loc if is_friend else grid_location(loc)) if loc else None
+            item["is_friend"] = is_friend
             if me.get("location") and u.get("location"):
                 item["distance_m"] = round(haversine_m(me["location"]["lat"], me["location"]["lng"], u["location"]["lat"], u["location"]["lng"]), 1)
             out.append(item)
