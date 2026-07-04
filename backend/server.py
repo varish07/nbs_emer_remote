@@ -10,6 +10,7 @@ import random
 import json
 import jwt
 import requests
+import redis.asyncio as aioredis
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict
@@ -34,6 +35,40 @@ TWILIO_FROM = os.environ.get('TWILIO_FROM_NUMBER', '').strip()
 TWILIO_ENABLED = bool(TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM)
 
 ADMIN_PHONES = {p.strip() for p in os.environ.get('ADMIN_PHONES', '').split(',') if p.strip()}
+
+# Redis cache (optional — falls back gracefully if unreachable)
+REDIS_URL = os.environ.get('REDIS_URL', '').strip()
+redis_client: Optional[aioredis.Redis] = None
+CACHE_TTL_BLOCKS = 300      # 5 min
+CACHE_TTL_FRIENDS = 120     # 2 min
+
+
+async def cache_get(key: str):
+    if not redis_client:
+        return None
+    try:
+        val = await redis_client.get(key)
+        return json.loads(val) if val else None
+    except Exception:
+        return None
+
+
+async def cache_set(key: str, value, ttl: int):
+    if not redis_client:
+        return
+    try:
+        await redis_client.set(key, json.dumps(value, default=str), ex=ttl)
+    except Exception:
+        pass
+
+
+async def cache_del(*keys: str):
+    if not redis_client or not keys:
+        return
+    try:
+        await redis_client.delete(*keys)
+    except Exception:
+        pass
 
 def is_admin(user: dict) -> bool:
     return user.get('phone', '') in ADMIN_PHONES
@@ -148,12 +183,17 @@ def public_user(u: dict) -> dict:
     }
 
 async def get_blocked_ids(user_id: str) -> set:
-    """Returns IDs blocked by user OR who blocked user (mutual hide)."""
+    """Returns IDs blocked by user OR who blocked user (mutual hide). Cached via Redis."""
+    cache_key = f"blocks:{user_id}"
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return set(cached)
     out = set()
     async for b in db.blocks.find({"blocker_id": user_id}, {"_id": 0, "blocked_id": 1}):
         out.add(b["blocked_id"])
     async for b in db.blocks.find({"blocked_id": user_id}, {"_id": 0, "blocker_id": 1}):
         out.add(b["blocker_id"])
+    await cache_set(cache_key, list(out), CACHE_TTL_BLOCKS)
     return out
 
 
@@ -467,6 +507,7 @@ async def send_request(req: FriendRequestCreate, user=Depends(get_current_user))
     })
     if reverse:
         await db.friend_requests.update_one({"id": reverse["id"]}, {"$set": {"status": "accepted", "responded_at": now_iso()}})
+        await cache_del(f"friends:{user['id']}", f"friends:{req.to_user_id}")
         return {"success": True, "status": "accepted", "auto_matched": True}
     rid = str(uuid.uuid4())
     doc = {
@@ -495,6 +536,10 @@ async def incoming_requests(user=Depends(get_current_user)):
 
 @api_router.get("/requests/friends")
 async def list_friends(user=Depends(get_current_user)):
+    cache_key = f"friends:{user['id']}"
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return {"friends": cached}
     blocked = await get_blocked_ids(user["id"])
     cursor = db.friend_requests.find({
         "$or": [
@@ -513,6 +558,7 @@ async def list_friends(user=Depends(get_current_user)):
         u = await db.users.find_one({"id": fid}, {"_id": 0})
         if u:
             friends.append(public_user(u))
+    await cache_set(cache_key, friends, CACHE_TTL_FRIENDS)
     return {"friends": friends}
 
 @api_router.post("/requests/respond")
@@ -522,6 +568,8 @@ async def respond_request(req: FriendRequestRespond, user=Depends(get_current_us
         raise HTTPException(status_code=404, detail="Request not found")
     new_status = "accepted" if req.accept else "rejected"
     await db.friend_requests.update_one({"id": req.request_id}, {"$set": {"status": new_status, "responded_at": now_iso()}})
+    if req.accept:
+        await cache_del(f"friends:{user['id']}", f"friends:{r['from_user_id']}")
     await manager.send_to(r["from_user_id"], {"type": "request_response", "status": new_status, "from_user_id": user["id"]})
     return {"success": True, "status": new_status}
 
@@ -601,11 +649,13 @@ async def block_user(req: BlockRequest, user=Depends(get_current_user)):
         "blocked_id": req.user_id,
         "created_at": now_iso(),
     })
+    await cache_del(f"blocks:{user['id']}", f"blocks:{req.user_id}", f"friends:{user['id']}", f"friends:{req.user_id}")
     return {"success": True}
 
 @api_router.post("/unblock")
 async def unblock_user(req: BlockRequest, user=Depends(get_current_user)):
     await db.blocks.delete_one({"blocker_id": user["id"], "blocked_id": req.user_id})
+    await cache_del(f"blocks:{user['id']}", f"blocks:{req.user_id}", f"friends:{user['id']}", f"friends:{req.user_id}")
     return {"success": True}
 
 @api_router.get("/block/list")
@@ -911,8 +961,17 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup():
+    global redis_client
     init_storage()
     await ensure_indexes()
+    if REDIS_URL:
+        try:
+            redis_client = aioredis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
+            await redis_client.ping()
+            logger.info(f"Redis connected: {REDIS_URL}")
+        except Exception as e:
+            logger.warning(f"Redis unavailable ({e}); caching disabled")
+            redis_client = None
 
 
 async def ensure_indexes():
