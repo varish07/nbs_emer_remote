@@ -6,7 +6,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 import math
-import random
+import secrets
 import json
 import jwt
 import requests
@@ -320,7 +320,7 @@ async def send_otp(req: SendOtpRequest):
         raise HTTPException(status_code=400, detail="Invalid phone number")
 
     if TWILIO_ENABLED:
-        otp = f"{random.randint(0, 999999):06d}"
+        otp = f"{secrets.randbelow(1000000):06d}"
     else:
         otp = "123456"
 

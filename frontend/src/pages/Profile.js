@@ -35,7 +35,7 @@ export default function Profile() {
       try {
         const { data } = await api.get("/block/list");
         setBlocked(data.blocked || []);
-      } catch { /* ignore */ }
+      } catch (err) { console.error("Failed to load blocked users:", err); }
     })();
   }, []);
 
