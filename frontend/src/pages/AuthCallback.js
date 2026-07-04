@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { api } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
@@ -8,7 +8,8 @@ import { Loader2 } from "lucide-react";
 // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
 export default function AuthCallback() {
   const nav = useNavigate();
-  const { login } = useAuth();
+  const loc = useLocation();
+  const { login, refreshUser, token } = useAuth();
   const hasProcessed = useRef(false);
 
   useEffect(() => {
@@ -23,19 +24,28 @@ export default function AuthCallback() {
       return;
     }
     const sessionId = decodeURIComponent(match[1]);
+    // If user was already signed in and clicked "Link Google", we called with ?link=1
+    const isLinking = new URLSearchParams(loc.search).get("link") === "1" && !!token;
 
     (async () => {
       try {
-        const { data } = await api.post("/auth/google/exchange", { session_id: sessionId });
-        login(data.token, data.user);
-        toast.success(`Welcome, ${data.user?.name || "friend"}!`);
-        nav("/", { replace: true });
+        if (isLinking) {
+          await api.post("/users/me/link-google", { session_id: sessionId });
+          toast.success("Google account linked ✓");
+          await refreshUser();
+          nav("/profile", { replace: true });
+        } else {
+          const { data } = await api.post("/auth/google/exchange", { session_id: sessionId });
+          login(data.token, data.user);
+          toast.success(`Welcome, ${data.user?.name || "friend"}!`);
+          nav("/", { replace: true });
+        }
       } catch (e) {
-        toast.error(e.response?.data?.detail || "Google sign-in failed");
-        nav("/login", { replace: true });
+        toast.error(e.response?.data?.detail || (isLinking ? "Link failed" : "Google sign-in failed"));
+        nav(isLinking ? "/profile" : "/login", { replace: true });
       }
     })();
-  }, [login, nav]);
+  }, [login, nav, loc.search, refreshUser, token]);
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-[#f7f7f9]">

@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
-import { Loader2, ArrowRight, Phone, ShieldCheck } from "lucide-react";
+import { Loader2, ArrowRight, User, ShieldCheck } from "lucide-react";
 
 // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
 function GoogleIcon({ size = 18 }) {
@@ -17,19 +17,44 @@ function GoogleIcon({ size = 18 }) {
   );
 }
 
+/**
+ * Detect what the user typed:
+ *   - `email` if the value contains `@`
+ *   - `phone` if it's mostly digits (or has a `+`)
+ *   - `unknown` otherwise
+ */
+function detectKind(value) {
+  const v = (value || "").trim();
+  if (!v) return "unknown";
+  if (v.includes("@")) return "email";
+  const digits = v.replace(/\D/g, "");
+  if (digits.length >= 6) return "phone";
+  return "unknown";
+}
+
 export default function Login() {
-  const [step, setStep] = useState("phone");
-  const [phone, setPhone] = useState("");
+  const [step, setStep] = useState("input");           // input | otp
+  const [value, setValue] = useState("");
   const [otp, setOtp] = useState("");
+  const [phoneE164, setPhoneE164] = useState("");       // remembered across steps
   const [loading, setLoading] = useState(false);
   const [mockOtp, setMockOtp] = useState("");
   const { login } = useAuth();
   const nav = useNavigate();
 
-  const sendOtp = async () => {
-    const digits = phone.replace(/\D/g, "");
+  const kind = useMemo(() => detectKind(value), [value]);
+
+  const startGoogleFlow = () => {
+    // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
+    const redirectUrl = window.location.origin + "/auth/callback";
+    window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
+  };
+
+  const startPhoneFlow = async () => {
+    const digits = value.replace(/\D/g, "");
     if (digits.length < 6) return toast.error("Please enter a valid phone number");
     const e164 = `+${digits}`;
+    setPhoneE164(e164);
     setLoading(true);
     try {
       const { data } = await api.post("/auth/send-otp", { phone: e164 });
@@ -41,13 +66,17 @@ export default function Login() {
     } finally { setLoading(false); }
   };
 
+  const continueClicked = () => {
+    if (kind === "email") return startGoogleFlow();
+    if (kind === "phone") return startPhoneFlow();
+    return toast.error("Enter a valid mobile number or email");
+  };
+
   const verifyOtp = async () => {
     if (otp.length < 4) return toast.error("Enter the 6-digit OTP");
-    const digits = phone.replace(/\D/g, "");
-    const e164 = `+${digits}`;
     setLoading(true);
     try {
-      const { data } = await api.post("/auth/verify-otp", { phone: e164, otp });
+      const { data } = await api.post("/auth/verify-otp", { phone: phoneE164, otp });
       login(data.token, data.user);
       toast.success("Welcome to NBS");
       nav("/", { replace: true });
@@ -55,6 +84,11 @@ export default function Login() {
       toast.error(e.response?.data?.detail || "Invalid OTP");
     } finally { setLoading(false); }
   };
+
+  const buttonLabel =
+    kind === "email" ? "Continue with Google" :
+    kind === "phone" ? "Send OTP" :
+    "Continue";
 
   return (
     <div className="min-h-screen bg-[#f7f7f9] flex items-stretch justify-center">
@@ -72,55 +106,79 @@ export default function Login() {
         </div>
 
         <div className="px-6 py-8">
-          {step === "phone" ? (
+          {step === "input" ? (
             <div className="space-y-6">
               <div>
                 <h2 className="font-display text-2xl font-semibold text-[#222]">Log in or sign up</h2>
-                <p className="text-sm text-[#717171] mt-1">We&apos;ll send a one-time code to your phone.</p>
+                <p className="text-sm text-[#717171] mt-1">Enter your mobile number or email — we&apos;ll pick the right flow.</p>
               </div>
+
               <div>
-                <label className="text-xs uppercase tracking-[0.18em] text-[#717171] font-bold">Mobile number</label>
+                <label className="text-xs uppercase tracking-[0.18em] text-[#717171] font-bold">Mobile or email</label>
                 <div className="mt-2 flex items-center border-b-2 border-[#EBEBEB] focus-within:border-[#FF385C] transition-colors">
-                  <Phone size={18} className="text-[#717171] mr-3" />
-                  <span className="text-xl text-[#222] font-medium select-none" data-testid="login-phone-prefix">+</span>
+                  {kind === "email" ? (
+                    <GoogleIcon size={18} />
+                  ) : (
+                    <User size={18} className="text-[#717171]" />
+                  )}
+                  {kind === "phone" && (
+                    <span className="text-xl text-[#222] font-medium select-none ml-3" data-testid="login-phone-prefix">+</span>
+                  )}
                   <input
-                    data-testid="login-phone-input"
-                    type="tel"
-                    inputMode="tel"
-                    value={phone}
-                    onChange={(e) => setPhone(e.target.value.replace(/\D/g, ""))}
-                    placeholder="91 98765 43210"
-                    className="flex-1 py-3 pl-1 text-xl tracking-wide outline-none bg-transparent text-[#222]"
+                    data-testid="login-smart-input"
+                    type="text"
+                    inputMode={kind === "email" ? "email" : "tel"}
+                    autoComplete={kind === "email" ? "email" : "tel"}
+                    value={value}
+                    onChange={(e) => setValue(e.target.value)}
+                    placeholder="+91 98765 43210 or you@gmail.com"
+                    className="flex-1 py-3 pl-3 text-lg tracking-wide outline-none bg-transparent text-[#222] placeholder:text-sm placeholder:tracking-normal"
                   />
                 </div>
-                <p className="text-[10px] text-[#717171] mt-2">Include country code (e.g. 91 for India, 1 for US).</p>
+                <p className="text-[10px] text-[#717171] mt-2" data-testid="login-mode-hint">
+                  {kind === "email" && "Detected email — you'll continue via Google sign-in."}
+                  {kind === "phone" && "Detected phone — we'll send you an SMS OTP."}
+                  {kind === "unknown" && "Start typing to auto-detect the sign-in method."}
+                </p>
               </div>
+
               <button
-                data-testid="login-send-otp-button"
-                onClick={sendOtp}
-                disabled={loading}
-                className="w-full bg-[#FF385C] hover:bg-[#E31C5F] active:scale-[0.98] transition text-white rounded-xl py-4 font-semibold flex items-center justify-center gap-2 shadow-lg shadow-[#FF385C]/20 disabled:opacity-60"
+                data-testid="login-continue-button"
+                onClick={continueClicked}
+                disabled={loading || kind === "unknown"}
+                className="w-full bg-[#FF385C] hover:bg-[#E31C5F] active:scale-[0.98] transition text-white rounded-xl py-4 font-semibold flex items-center justify-center gap-2 shadow-lg shadow-[#FF385C]/20 disabled:opacity-50"
               >
-                {loading ? <Loader2 className="animate-spin" size={18} /> : <>Send OTP <ArrowRight size={18} /></>}
+                {loading ? <Loader2 className="animate-spin" size={18} /> : (
+                  <>
+                    {kind === "email" && <GoogleIcon size={18} />}
+                    {buttonLabel}
+                    <ArrowRight size={18} />
+                  </>
+                )}
               </button>
 
-              <div className="flex items-center gap-3 my-2">
+              <div className="flex items-center gap-3">
                 <div className="flex-1 h-px bg-[#EBEBEB]" />
                 <span className="text-[10px] uppercase tracking-[0.18em] text-[#9CA3AF] font-bold">or</span>
                 <div className="flex-1 h-px bg-[#EBEBEB]" />
               </div>
 
-              <button
-                data-testid="login-google-button"
-                onClick={() => {
-                  // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
-                  const redirectUrl = window.location.origin + "/auth/callback";
-                  window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
-                }}
-                className="w-full bg-white border border-[#EBEBEB] hover:bg-[#F7F7F9] active:scale-[0.98] transition text-[#222] rounded-xl py-3.5 font-semibold flex items-center justify-center gap-2"
-              >
-                <GoogleIcon size={18} /> Continue with Google
-              </button>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  data-testid="login-quick-google"
+                  onClick={startGoogleFlow}
+                  className="border border-[#EBEBEB] hover:bg-[#F7F7F9] text-[#222] rounded-xl py-3 font-semibold flex items-center justify-center gap-2 text-sm"
+                >
+                  <GoogleIcon size={16} /> Google
+                </button>
+                <button
+                  data-testid="login-quick-phone"
+                  onClick={() => { setValue(""); document.querySelector('[data-testid="login-smart-input"]')?.focus(); }}
+                  className="border border-[#EBEBEB] hover:bg-[#F7F7F9] text-[#222] rounded-xl py-3 font-semibold flex items-center justify-center gap-2 text-sm"
+                >
+                  <User size={16} /> Mobile
+                </button>
+              </div>
 
               <p className="text-xs text-[#717171] text-center">By continuing you agree to NBS Terms & Privacy.</p>
             </div>
@@ -128,7 +186,7 @@ export default function Login() {
             <div className="space-y-6">
               <div>
                 <h2 className="font-display text-2xl font-semibold text-[#222]">Enter verification code</h2>
-                <p className="text-sm text-[#717171] mt-1">Sent to <span className="text-[#222] font-medium">+{phone}</span></p>
+                <p className="text-sm text-[#717171] mt-1">Sent to <span className="text-[#222] font-medium">{phoneE164}</span></p>
                 {mockOtp && (
                   <div className="mt-3 inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#FFEBEE] text-[#C13515] text-xs font-medium" data-testid="mock-otp-hint">
                     <ShieldCheck size={14} /> Demo OTP: {mockOtp}
@@ -156,10 +214,10 @@ export default function Login() {
               </button>
               <button
                 data-testid="login-back-button"
-                onClick={() => { setStep("phone"); setOtp(""); }}
+                onClick={() => { setStep("input"); setOtp(""); }}
                 className="w-full text-sm text-[#717171] hover:text-[#222] transition"
               >
-                ← Change number
+                ← Use a different number or email
               </button>
             </div>
           )}

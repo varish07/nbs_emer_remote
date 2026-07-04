@@ -556,6 +556,111 @@ async def google_auth_exchange(req: GoogleAuthExchangeRequest, request: Request)
     return {"token": token, "user": public_user(user)}
 
 
+# ============= Account Linking (attach other identifier to current session) =============
+
+@api_router.post("/users/me/link-phone/send-otp")
+async def link_phone_send_otp(req: SendOtpRequest, request: Request, user=Depends(get_current_user)):
+    """Start attaching a phone to the currently signed-in user (e.g. a Google user wants SMS login too)."""
+    phone = req.phone.strip()
+    if len(phone) < 6:
+        raise HTTPException(status_code=400, detail="Invalid phone number")
+
+    existing = await db.users.find_one({"phone": phone, "id": {"$ne": user["id"]}}, {"_id": 0, "id": 1})
+    if existing:
+        raise HTTPException(status_code=409, detail="Phone already linked to another account")
+
+    ip = client_ip(request)
+    if not await rate_limit(f"otp:send:phone:{phone}", OTP_SEND_LIMIT_PER_PHONE, OTP_SEND_WINDOW):
+        raise HTTPException(status_code=429, detail="Too many OTP requests for this number.")
+    if not await rate_limit(f"otp:send:ip:{ip}", OTP_SEND_LIMIT_PER_IP, OTP_SEND_WINDOW):
+        raise HTTPException(status_code=429, detail="Too many OTP requests from your network.")
+
+    if TWILIO_ENABLED:
+        otp = f"{secrets.randbelow(1000000):06d}"
+    else:
+        otp = "123456"
+
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=OTP_TTL_SECONDS)
+    await db.otps.update_one(
+        {"phone": phone},
+        {"$set": {"phone": phone, "otp": otp, "expires_at": expires_at, "attempts": 0, "link_user_id": user["id"], "created_at": now_iso()}},
+        upsert=True
+    )
+
+    if TWILIO_ENABLED:
+        if not send_sms_otp(phone, otp):
+            raise HTTPException(status_code=502, detail="Failed to send OTP via SMS")
+        return {"success": True, "mock": False}
+    return {"success": True, "mock": True, "mock_otp": otp}
+
+
+@api_router.post("/users/me/link-phone/verify")
+async def link_phone_verify(req: VerifyOtpRequest, user=Depends(get_current_user)):
+    phone = req.phone.strip()
+    rec = await db.otps.find_one({"phone": phone}, {"_id": 0})
+    if not rec or rec.get("link_user_id") != user["id"]:
+        raise HTTPException(status_code=400, detail="Verification session not found — please request a fresh OTP")
+
+    exp = rec.get("expires_at")
+    if isinstance(exp, str):
+        exp = datetime.fromisoformat(exp)
+    if exp and exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    if exp and datetime.now(timezone.utc) > exp:
+        await db.otps.delete_one({"phone": phone})
+        raise HTTPException(status_code=400, detail="OTP expired")
+
+    if rec.get("attempts", 0) >= OTP_MAX_ATTEMPTS:
+        await db.otps.delete_one({"phone": phone})
+        raise HTTPException(status_code=429, detail="Too many wrong attempts")
+
+    valid = (not TWILIO_ENABLED and req.otp == "123456") or (rec.get("otp") == req.otp)
+    if not valid:
+        await db.otps.update_one({"phone": phone}, {"$inc": {"attempts": 1}})
+        raise HTTPException(status_code=400, detail="Invalid OTP")
+
+    # Race check: someone else may have grabbed the phone in the meantime
+    existing = await db.users.find_one({"phone": phone, "id": {"$ne": user["id"]}}, {"_id": 0, "id": 1})
+    if existing:
+        await db.otps.delete_one({"phone": phone})
+        raise HTTPException(status_code=409, detail="Phone already linked to another account")
+
+    await db.users.update_one({"id": user["id"]}, {"$set": {"phone": phone}})
+    await db.otps.delete_one({"phone": phone})
+    updated = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    return {"success": True, "user": public_user(updated)}
+
+
+@api_router.post("/users/me/link-google")
+async def link_google(req: GoogleAuthExchangeRequest, request: Request, user=Depends(get_current_user)):
+    """Attach a Google email to the current user (e.g. an OTP user wants Google login too)."""
+    ip = client_ip(request)
+    if not await rate_limit(f"gauth:ip:{ip}", 20, OTP_SEND_WINDOW):
+        raise HTTPException(status_code=429, detail="Too many attempts. Try later.")
+    try:
+        resp = requests.get(EMERGENT_AUTH_SESSION_URL, headers={"X-Session-ID": req.session_id}, timeout=15)
+    except requests.exceptions.RequestException as e:
+        logger.error(f"link_google: {e}")
+        raise HTTPException(status_code=502, detail="Auth provider unreachable")
+    if resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid or expired Google session")
+    data = resp.json()
+    email = (data.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Google session missing email")
+
+    existing = await db.users.find_one({"email": email, "id": {"$ne": user["id"]}}, {"_id": 0, "id": 1})
+    if existing:
+        raise HTTPException(status_code=409, detail="This Google account is already linked to another NBS user")
+
+    updates = {"email": email}
+    if not user.get("avatar") and data.get("picture"):
+        updates["avatar"] = data["picture"]
+    await db.users.update_one({"id": user["id"]}, {"$set": updates})
+    updated = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    return {"success": True, "user": public_user(updated)}
+
+
 # ============= User Routes =============
 
 @api_router.get("/users/me")
