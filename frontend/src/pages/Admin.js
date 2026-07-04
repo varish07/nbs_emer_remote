@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
-import { Loader2, Flag, Users, MessageCircle, Ban, CheckCircle2, AlertTriangle, X, ArrowLeft, Trash2, Download, ShieldOff, LifeBuoy, Database } from "lucide-react";
+import { Loader2, Flag, Users, MessageCircle, Ban, CheckCircle2, AlertTriangle, X, ArrowLeft, Trash2, Download, ShieldOff, LifeBuoy, Database, RefreshCw } from "lucide-react";
 
 function Stat({ label, value, icon: Icon }) {
   return (
@@ -35,6 +35,9 @@ export default function Admin() {
   const [tickets, setTickets] = useState([]);
   const [ticketsLoading, setTicketsLoading] = useState(false);
   const [busy, setBusy] = useState(false);
+  // "loaded" set tracks which tabs have been fetched — prevents refetch on tab switch
+  const [loaded, setLoaded] = useState(() => new Set());
+  const markLoaded = (t) => setLoaded((s) => new Set(s).add(t));
 
   useEffect(() => {
     if (loading) return;
@@ -60,6 +63,7 @@ export default function Admin() {
       const params = reportStatus === "all" ? {} : { status: reportStatus };
       const r = await api.get("/admin/reports", { params });
       setReports(r.data.reports || []);
+      markLoaded("reports");
     } catch (e) {
       toast.error(e.response?.data?.detail || "Failed to load reports");
     }
@@ -70,6 +74,7 @@ export default function Admin() {
     try {
       const c = await api.get("/admin/chats");
       setChats(c.data.chats || []);
+      markLoaded("messages");
     } catch (e) {
       toast.error(e.response?.data?.detail || "Failed to load chats");
     } finally { setChatsLoading(false); }
@@ -80,6 +85,7 @@ export default function Admin() {
     try {
       const { data } = await api.get("/admin/blocks");
       setBlocks(data.blocks || []);
+      markLoaded("blocks");
     } catch (e) {
       toast.error(e.response?.data?.detail || "Failed to load blocks");
     } finally { setBlocksLoading(false); }
@@ -90,16 +96,27 @@ export default function Admin() {
     try {
       const { data } = await api.get("/admin/support");
       setTickets(data.tickets || []);
+      markLoaded("support");
     } catch (e) {
       toast.error(e.response?.data?.detail || "Failed to load tickets");
     } finally { setTicketsLoading(false); }
   }, []);
 
   useEffect(() => { if (user?.is_admin) refreshTop(); }, [user, refreshTop]);
-  useEffect(() => { if (user?.is_admin && tab === "reports") refreshReports(); }, [user, tab, refreshReports]);
-  useEffect(() => { if (user?.is_admin && tab === "messages") refreshChats(); }, [user, tab, refreshChats]);
-  useEffect(() => { if (user?.is_admin && tab === "blocks") refreshBlocks(); }, [user, tab, refreshBlocks]);
-  useEffect(() => { if (user?.is_admin && tab === "support") refreshTickets(); }, [user, tab, refreshTickets]);
+  useEffect(() => { if (user?.is_admin && tab === "reports" && !loaded.has("reports")) refreshReports(); }, [user, tab, refreshReports, loaded]);
+  useEffect(() => { if (user?.is_admin && tab === "messages" && !loaded.has("messages")) refreshChats(); }, [user, tab, refreshChats, loaded]);
+  useEffect(() => { if (user?.is_admin && tab === "blocks" && !loaded.has("blocks")) refreshBlocks(); }, [user, tab, refreshBlocks, loaded]);
+  useEffect(() => { if (user?.is_admin && tab === "support" && !loaded.has("support")) refreshTickets(); }, [user, tab, refreshTickets, loaded]);
+  // When user changes the report filter, force a re-fetch
+  useEffect(() => { if (user?.is_admin && loaded.has("reports")) refreshReports(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [reportStatus]);
+
+  const refreshCurrentTab = () => {
+    if (tab === "reports") refreshReports();
+    else if (tab === "messages") refreshChats();
+    else if (tab === "blocks") refreshBlocks();
+    else if (tab === "support") refreshTickets();
+    else refreshTop();
+  };
 
   const openChatDetail = async (chat_key) => {
     try {

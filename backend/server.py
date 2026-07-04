@@ -973,15 +973,15 @@ async def admin_list_reports(status: Optional[str] = None, user=Depends(require_
     q = {}
     if status:
         q["status"] = status
-    out = []
-    async for r in db.reports.find(q, {"_id": 0}).sort("created_at", -1).limit(200):
-        reporter = await db.users.find_one({"id": r["reporter_id"]}, {"_id": 0})
-        reported = await db.users.find_one({"id": r["reported_id"]}, {"_id": 0})
-        out.append({
-            **r,
-            "reporter": public_user(reporter) if reporter else None,
-            "reported": public_user(reported) if reported else None,
-        })
+    reports = await db.reports.find(q, {"_id": 0}).sort("created_at", -1).limit(200).to_list(200)
+    user_ids = {r.get("reporter_id") for r in reports} | {r.get("reported_id") for r in reports}
+    user_ids.discard(None)
+    users_map = {u["id"]: public_user(u) async for u in db.users.find({"id": {"$in": list(user_ids)}}, {"_id": 0})}
+    out = [{
+        **r,
+        "reporter": users_map.get(r.get("reporter_id")),
+        "reported": users_map.get(r.get("reported_id")),
+    } for r in reports]
     return {"reports": out}
 
 @api_router.post("/admin/reports/{report_id}/resolve")
@@ -1034,14 +1034,19 @@ async def admin_list_chats(user=Depends(require_admin)):
         {"$sort": {"last_at": -1}},
         {"$limit": 200},
     ]
+    rows = await db.messages.aggregate(pipeline).to_list(200)
+    # Collect all participant IDs and hydrate in ONE query
+    user_ids = set()
+    for row in rows:
+        for pid in row["_id"].split("|"):
+            user_ids.add(pid)
+    users_map = {u["id"]: public_user(u) async for u in db.users.find({"id": {"$in": list(user_ids)}}, {"_id": 0})}
     chats = []
-    async for row in db.messages.aggregate(pipeline):
+    for row in rows:
         parts = row["_id"].split("|")
-        u1 = await db.users.find_one({"id": parts[0]}, {"_id": 0}) if len(parts) > 0 else None
-        u2 = await db.users.find_one({"id": parts[1]}, {"_id": 0}) if len(parts) > 1 else None
         chats.append({
             "chat_key": row["_id"],
-            "participants": [public_user(u1) if u1 else None, public_user(u2) if u2 else None],
+            "participants": [users_map.get(parts[0]), users_map.get(parts[1]) if len(parts) > 1 else None],
             "last_message": row["last_message"],
             "last_from": row["last_from"],
             "last_at": row["last_at"],
@@ -1104,25 +1109,25 @@ async def admin_export_chat_csv(chat_key: str, user=Depends(require_admin)):
 
 @api_router.get("/admin/blocks")
 async def admin_list_blocks(user=Depends(require_admin)):
-    out = []
-    async for b in db.blocks.find({}, {"_id": 0}).sort("created_at", -1).limit(500):
-        blocker = await db.users.find_one({"id": b["blocker_id"]}, {"_id": 0})
-        blocked = await db.users.find_one({"id": b["blocked_id"]}, {"_id": 0})
-        out.append({
-            "id": b["id"],
-            "created_at": b.get("created_at"),
-            "blocker": public_user(blocker) if blocker else {"id": b["blocker_id"], "name": "?"},
-            "blocked": public_user(blocked) if blocked else {"id": b["blocked_id"], "name": "?"},
-        })
+    rows = await db.blocks.find({}, {"_id": 0}).sort("created_at", -1).limit(500).to_list(500)
+    user_ids = {b["blocker_id"] for b in rows} | {b["blocked_id"] for b in rows}
+    users_map = {u["id"]: public_user(u) async for u in db.users.find({"id": {"$in": list(user_ids)}}, {"_id": 0})}
+    out = [{
+        "id": b["id"],
+        "created_at": b.get("created_at"),
+        "blocker": users_map.get(b["blocker_id"], {"id": b["blocker_id"], "name": "?"}),
+        "blocked": users_map.get(b["blocked_id"], {"id": b["blocked_id"], "name": "?"}),
+    } for b in rows]
     return {"blocks": out}
 
 
 @api_router.get("/admin/support")
 async def admin_list_support(user=Depends(require_admin)):
-    out = []
-    async for t in db.support_tickets.find({}, {"_id": 0}).sort("created_at", -1).limit(500):
-        author = await db.users.find_one({"id": t.get("user_id")}, {"_id": 0})
-        out.append({**t, "author": public_user(author) if author else None})
+    tickets = await db.support_tickets.find({}, {"_id": 0}).sort("created_at", -1).limit(500).to_list(500)
+    user_ids = {t.get("user_id") for t in tickets}
+    user_ids.discard(None)
+    users_map = {u["id"]: public_user(u) async for u in db.users.find({"id": {"$in": list(user_ids)}}, {"_id": 0})}
+    out = [{**t, "author": users_map.get(t.get("user_id"))} for t in tickets]
     return {"tickets": out}
 
 
