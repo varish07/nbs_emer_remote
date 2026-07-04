@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect, UploadFile, File, Response, Query, Header
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect, UploadFile, File, Response, Query, Header, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -16,7 +16,6 @@ from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict
 import uuid
 from datetime import datetime, timezone, timedelta
-
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -87,55 +86,86 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 
+# Constants for OTP security
+OTP_TTL_SECONDS = 600           # 10 minutes
+OTP_MAX_ATTEMPTS = 5            # brute-force lockout
+OTP_SEND_LIMIT_PER_PHONE = 3    # per window
+OTP_SEND_WINDOW = 600           # 10 minutes
+OTP_SEND_LIMIT_PER_IP = 10      # per window
+OTP_VERIFY_LIMIT_PER_IP = 20    # per window
+
+LOCATION_GRID_DECIMALS = 3  # ~110m precision — safety vs UX tradeoff
+
+
+async def rate_limit(key: str, limit: int, window: int) -> bool:
+    """Redis-based rate limiter. Returns True if allowed, False if exceeded.
+    Fails-open if Redis is unavailable so we don't lock out real users."""
+    if not redis_client:
+        return True
+    try:
+        count = await redis_client.incr(key)
+        if count == 1:
+            await redis_client.expire(key, window)
+        return count <= limit
+    except Exception:
+        return True
+
+
+def client_ip(request) -> str:
+    # Emergent proxy sets X-Forwarded-For
+    fwd = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    return fwd or (request.client.host if request.client else "unknown")
+
+
 # ============= Models =============
 
 class SendOtpRequest(BaseModel):
-    phone: str
+    phone: str = Field(..., min_length=6, max_length=20)
 
 class VerifyOtpRequest(BaseModel):
-    phone: str
-    otp: str
+    phone: str = Field(..., min_length=6, max_length=20)
+    otp: str = Field(..., min_length=4, max_length=8)
 
 class UpdateProfileRequest(BaseModel):
-    name: Optional[str] = None
-    email: Optional[str] = None
-    avatar: Optional[str] = None
-    bio: Optional[str] = None
-    going_to: Optional[str] = None
-    home_location: Optional[str] = None
+    name: Optional[str] = Field(None, max_length=60)
+    email: Optional[str] = Field(None, max_length=120)
+    avatar: Optional[str] = Field(None, max_length=500)
+    bio: Optional[str] = Field(None, max_length=500)
+    going_to: Optional[str] = Field(None, max_length=120)
+    home_location: Optional[str] = Field(None, max_length=120)
 
 class UpdateLocationRequest(BaseModel):
-    lat: float
-    lng: float
+    lat: float = Field(..., ge=-90, le=90)
+    lng: float = Field(..., ge=-180, le=180)
 
 class SetActiveRequest(BaseModel):
     is_active: bool
-    radius: Optional[int] = None
+    radius: Optional[int] = Field(None, ge=10, le=10000)
 
 class FriendRequestCreate(BaseModel):
-    to_user_id: str
+    to_user_id: str = Field(..., min_length=8, max_length=64)
 
 class FriendRequestRespond(BaseModel):
-    request_id: str
+    request_id: str = Field(..., min_length=8, max_length=64)
     accept: bool
 
 class MessageCreate(BaseModel):
-    to_user_id: str
-    text: str
+    to_user_id: str = Field(..., min_length=8, max_length=64)
+    text: str = Field(..., min_length=1, max_length=2000)
 
 class SupportRequest(BaseModel):
-    type: str
-    name: Optional[str] = None
-    email: Optional[str] = None
-    message: str
+    type: str = Field(..., max_length=40)
+    name: Optional[str] = Field(None, max_length=80)
+    email: Optional[str] = Field(None, max_length=120)
+    message: str = Field(..., min_length=1, max_length=2000)
 
 class BlockRequest(BaseModel):
-    user_id: str
+    user_id: str = Field(..., min_length=8, max_length=64)
 
 class ReportRequest(BaseModel):
-    user_id: str
-    reason: str
-    details: Optional[str] = None
+    user_id: str = Field(..., min_length=8, max_length=64)
+    reason: str = Field(..., min_length=1, max_length=120)
+    details: Optional[str] = Field(None, max_length=1000)
 
 
 # ============= Helpers =============
@@ -170,6 +200,33 @@ def haversine_m(lat1, lng1, lat2, lng2):
     return 2*R*math.asin(math.sqrt(a))
 
 def public_user(u: dict) -> dict:
+    """SAFE for exposing to other users. Never includes precise GPS."""
+    return {
+        "id": u.get("id"),
+        "name": u.get("name") or "User",
+        "phone": u.get("phone"),
+        "avatar": u.get("avatar"),
+        "bio": u.get("bio"),
+        "going_to": u.get("going_to"),
+        "home_location": u.get("home_location"),
+        "is_active": u.get("is_active", False),
+        # location intentionally omitted — see grid_location() for public map view
+    }
+
+
+def grid_location(loc: Optional[dict]) -> Optional[dict]:
+    """Rounds lat/lng to a ~110m grid to prevent stalking."""
+    if not loc:
+        return None
+    lat = loc.get("lat")
+    lng = loc.get("lng")
+    if lat is None or lng is None:
+        return None
+    return {"lat": round(float(lat), LOCATION_GRID_DECIMALS), "lng": round(float(lng), LOCATION_GRID_DECIMALS)}
+
+
+def self_user(u: dict) -> dict:
+    """Only for the authenticated caller's OWN profile — precise location included."""
     return {
         "id": u.get("id"),
         "name": u.get("name") or "User",
@@ -314,19 +371,33 @@ manager = ConnectionManager()
 # ============= Auth Routes =============
 
 @api_router.post("/auth/send-otp")
-async def send_otp(req: SendOtpRequest):
+async def send_otp(req: SendOtpRequest, request: Request):
     phone = req.phone.strip()
     if len(phone) < 6:
         raise HTTPException(status_code=400, detail="Invalid phone number")
+
+    # Rate limiting: per-phone + per-IP
+    ip = client_ip(request)
+    if not await rate_limit(f"otp:send:phone:{phone}", OTP_SEND_LIMIT_PER_PHONE, OTP_SEND_WINDOW):
+        raise HTTPException(status_code=429, detail="Too many OTP requests for this number. Try again in 10 min.")
+    if not await rate_limit(f"otp:send:ip:{ip}", OTP_SEND_LIMIT_PER_IP, OTP_SEND_WINDOW):
+        raise HTTPException(status_code=429, detail="Too many OTP requests from your network. Try again later.")
 
     if TWILIO_ENABLED:
         otp = f"{secrets.randbelow(1000000):06d}"
     else:
         otp = "123456"
 
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=OTP_TTL_SECONDS)
     await db.otps.update_one(
         {"phone": phone},
-        {"$set": {"phone": phone, "otp": otp, "created_at": now_iso()}},
+        {"$set": {
+            "phone": phone,
+            "otp": otp,
+            "created_at": now_iso(),
+            "expires_at": expires_at,
+            "attempts": 0,
+        }},
         upsert=True
     )
 
@@ -340,13 +411,43 @@ async def send_otp(req: SendOtpRequest):
         return {"success": True, "message": "OTP sent (mock). Use 123456 to verify.", "mock_otp": otp, "mock": True}
 
 @api_router.post("/auth/verify-otp")
-async def verify_otp(req: VerifyOtpRequest):
+async def verify_otp(req: VerifyOtpRequest, request: Request):
     phone = req.phone.strip()
+    ip = client_ip(request)
+    if not await rate_limit(f"otp:verify:ip:{ip}", OTP_VERIFY_LIMIT_PER_IP, OTP_SEND_WINDOW):
+        raise HTTPException(status_code=429, detail="Too many verification attempts. Try again later.")
+
     rec = await db.otps.find_one({"phone": phone}, {"_id": 0})
+
+    # Expiry check (both natural TTL + explicit field)
+    if rec and rec.get("expires_at"):
+        exp = rec["expires_at"]
+        if isinstance(exp, str):
+            exp = datetime.fromisoformat(exp)
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) > exp:
+            await db.otps.delete_one({"phone": phone})
+            raise HTTPException(status_code=400, detail="OTP expired, request a new one")
+
+    # Attempt lockout
+    if rec and rec.get("attempts", 0) >= OTP_MAX_ATTEMPTS:
+        await db.otps.delete_one({"phone": phone})
+        raise HTTPException(status_code=429, detail="Too many wrong attempts. Request a new OTP.")
+
+    valid = False
     if not TWILIO_ENABLED and req.otp == "123456":
-        pass
-    elif not rec or rec.get("otp") != req.otp:
+        valid = True
+    elif rec and rec.get("otp") == req.otp:
+        valid = True
+
+    if not valid:
+        if rec:
+            await db.otps.update_one({"phone": phone}, {"$inc": {"attempts": 1}})
         raise HTTPException(status_code=400, detail="Invalid OTP")
+
+    # Success: burn the OTP so it can't be reused
+    await db.otps.delete_one({"phone": phone})
 
     user = await db.users.find_one({"phone": phone}, {"_id": 0})
     if not user:
@@ -373,7 +474,7 @@ async def verify_otp(req: VerifyOtpRequest):
 @api_router.get("/users/me")
 async def get_me(user=Depends(get_current_user)):
     user.pop("_id", None)
-    return {**public_user(user), "email": user.get("email"), "radius": user.get("radius", 100), "is_admin": is_admin(user), "home_location": user.get("home_location")}
+    return {**self_user(user), "email": user.get("email"), "radius": user.get("radius", 100), "is_admin": is_admin(user)}
 
 @api_router.put("/users/me")
 async def update_me(req: UpdateProfileRequest, user=Depends(get_current_user)):
@@ -381,7 +482,7 @@ async def update_me(req: UpdateProfileRequest, user=Depends(get_current_user)):
     if update:
         await db.users.update_one({"id": user["id"]}, {"$set": update})
     u = await db.users.find_one({"id": user["id"]}, {"_id": 0})
-    return {**public_user(u), "email": u.get("email"), "radius": u.get("radius", 100)}
+    return {**self_user(u), "email": u.get("email"), "radius": u.get("radius", 100)}
 
 @api_router.post("/users/me/avatar")
 async def upload_avatar(file: UploadFile = File(...), user=Depends(get_current_user)):
@@ -432,6 +533,47 @@ async def set_active(req: SetActiveRequest, user=Depends(get_current_user)):
     await db.users.update_one({"id": user["id"]}, {"$set": update})
     return {"success": True, **update}
 
+
+@api_router.get("/users/me/export")
+async def export_my_data(user=Depends(get_current_user)):
+    """GDPR / DPDPA style data export. Returns everything we hold on the caller."""
+    uid = user["id"]
+    me = await db.users.find_one({"id": uid}, {"_id": 0})
+    msgs = await db.messages.find({"$or": [{"from_user_id": uid}, {"to_user_id": uid}]}, {"_id": 0}).sort("created_at", 1).to_list(50000)
+    frs = await db.friend_requests.find({"$or": [{"from_user_id": uid}, {"to_user_id": uid}]}, {"_id": 0}).to_list(10000)
+    blocks_out = await db.blocks.find({"blocker_id": uid}, {"_id": 0}).to_list(10000)
+    blocks_in = await db.blocks.find({"blocked_id": uid}, {"_id": 0}).to_list(10000)
+    reports = await db.reports.find({"reporter_id": uid}, {"_id": 0}).to_list(10000)
+    tickets = await db.support_tickets.find({"user_id": uid}, {"_id": 0}).to_list(10000)
+    return {
+        "exported_at": now_iso(),
+        "profile": me,
+        "messages": msgs,
+        "friend_requests": frs,
+        "blocks_i_made": blocks_out,
+        "blocks_against_me": blocks_in,
+        "reports_i_filed": reports,
+        "support_tickets": tickets,
+    }
+
+
+@api_router.delete("/users/me")
+async def delete_my_account(user=Depends(get_current_user)):
+    """Permanently delete the caller's account and related data."""
+    uid = user["id"]
+    # Remove all traces
+    await db.messages.delete_many({"$or": [{"from_user_id": uid}, {"to_user_id": uid}]})
+    await db.friend_requests.delete_many({"$or": [{"from_user_id": uid}, {"to_user_id": uid}]})
+    await db.blocks.delete_many({"$or": [{"blocker_id": uid}, {"blocked_id": uid}]})
+    await db.reports.delete_many({"reporter_id": uid})
+    await db.support_tickets.delete_many({"user_id": uid})
+    await db.otps.delete_one({"phone": user.get("phone", "")})
+    await db.users.delete_one({"id": uid})
+    # Bust caches
+    await cache_del(f"blocks:{uid}", f"friends:{uid}")
+    logger.info(f"Account deleted: {uid}")
+    return {"success": True, "message": "Account and all data permanently deleted."}
+
 @api_router.get("/users/nearby")
 async def get_nearby(user=Depends(get_current_user)):
     me = await db.users.find_one({"id": user["id"]}, {"_id": 0})
@@ -454,7 +596,7 @@ async def get_nearby(user=Depends(get_current_user)):
             continue
         d = haversine_m(my_loc["lat"], my_loc["lng"], loc["lat"], loc["lng"])
         if d <= radius:
-            nearby.append({**public_user(u), "distance_m": round(d, 1)})
+            nearby.append({**public_user(u), "distance_m": round(d, 1), "location": grid_location(loc)})
     nearby.sort(key=lambda x: x["distance_m"])
     return {"users": nearby, "my_radius": radius}
 
@@ -472,8 +614,10 @@ async def get_all_active(user=Depends(get_current_user)):
     out = []
     async for u in cursor:
         item = public_user(u)
-        if my_loc and u.get("location"):
-            item["distance_m"] = round(haversine_m(my_loc["lat"], my_loc["lng"], u["location"]["lat"], u["location"]["lng"]), 1)
+        loc = u.get("location")
+        item["location"] = grid_location(loc)
+        if my_loc and loc:
+            item["distance_m"] = round(haversine_m(my_loc["lat"], my_loc["lng"], loc["lat"], loc["lng"]), 1)
         else:
             item["distance_m"] = None
         out.append(item)
@@ -708,6 +852,7 @@ async def get_matches(user=Depends(get_current_user)):
             item = public_user(u)
             item["match_score"] = len(overlap)
             item["matched_on"] = list(overlap)
+            item["location"] = grid_location(u.get("location"))
             if me.get("location") and u.get("location"):
                 item["distance_m"] = round(haversine_m(me["location"]["lat"], me["location"]["lng"], u["location"]["lat"], u["location"]["lng"]), 1)
             out.append(item)
@@ -982,8 +1127,9 @@ async def ensure_indexes():
         await db.users.create_index("phone", unique=True)
         await db.users.create_index("is_active")
 
-        # otps: keyed by phone (upserted on send-otp)
+        # otps: keyed by phone (upserted on send-otp); TTL index auto-expires records
         await db.otps.create_index("phone", unique=True)
+        await db.otps.create_index("expires_at", expireAfterSeconds=0)
 
         # friend_requests: multiple hot lookups
         await db.friend_requests.create_index("id", unique=True)

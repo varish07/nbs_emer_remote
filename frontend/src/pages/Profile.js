@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from "react";
 import { api } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
-import { Loader2, LogOut, Save, Camera, ShieldOff, Users } from "lucide-react";
+import { Loader2, LogOut, Save, Camera, ShieldOff, Users, Download, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -72,6 +72,34 @@ export default function Profile() {
       setBlocked((b) => b.filter((u) => u.id !== id));
       toast.success("Unblocked");
     } catch { toast.error("Failed"); }
+  };
+
+  const exportData = async () => {
+    try {
+      const { data } = await api.get("/users/me/export");
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `nbs-my-data-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      toast.success("Data exported");
+    } catch { toast.error("Export failed"); }
+  };
+
+  const deleteAccount = async () => {
+    const confirmText = window.prompt('This will PERMANENTLY delete your account and all data (messages, friends, blocks). This cannot be undone.\n\nType DELETE to confirm:');
+    if (confirmText !== "DELETE") { toast.info("Cancelled"); return; }
+    try {
+      await api.delete("/users/me");
+      toast.success("Account deleted. Goodbye 💔");
+      setTimeout(() => logout(), 800);
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Delete failed");
+    }
   };
 
   const fld = (k) => ({
@@ -194,6 +222,24 @@ export default function Profile() {
         >
           <LogOut size={16} /> Log out
         </button>
+
+        <div className="pt-4 border-t border-[#EBEBEB] space-y-2">
+          <p className="text-xs uppercase tracking-[0.18em] font-bold text-[#717171]">Your data</p>
+          <button
+            data-testid="export-my-data-button"
+            onClick={exportData}
+            className="w-full border border-[#EBEBEB] hover:bg-[#F7F7F9] text-[#222] rounded-xl py-3 font-semibold flex items-center justify-center gap-2"
+          >
+            <Download size={16} /> Download my data (.json)
+          </button>
+          <button
+            data-testid="delete-account-button"
+            onClick={deleteAccount}
+            className="w-full border border-[#FCA5A5] hover:bg-[#FEF2F2] text-[#B91C1C] rounded-xl py-3 font-semibold flex items-center justify-center gap-2"
+          >
+            <Trash2 size={16} /> Delete my account
+          </button>
+        </div>
       </div>
     </div>
   );
