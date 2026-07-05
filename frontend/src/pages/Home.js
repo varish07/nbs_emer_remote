@@ -55,7 +55,7 @@ export default function Home() {
       const { data } = await api.get("/users/nearby");
       setUsers(data.users || []);
     } catch (e) {
-      // ignore
+      console.error("Failed to load nearby users:", e);
     } finally { setLoading(false); }
   }, []);
 
