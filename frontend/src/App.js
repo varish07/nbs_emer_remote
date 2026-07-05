@@ -13,6 +13,7 @@ import Chat from "@/pages/Chat";
 import Profile from "@/pages/Profile";
 import Support from "@/pages/Support";
 import Admin from "@/pages/Admin";
+import AuthCallback from "@/pages/AuthCallback";
 import MobileShell from "@/components/MobileShell";
 
 function Protected({ children }) {
@@ -34,6 +35,7 @@ function AppRoutes() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
+      <Route path="/auth/callback" element={<AuthCallback />} />
       <Route path="/" element={<Shell><Home /></Shell>} />
       <Route path="/active" element={<Shell><ActiveUsers /></Shell>} />
       <Route path="/map" element={<Shell><MapView /></Shell>} />

@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, useRef, useCallback } from "react";
+import { createContext, useContext, useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { api, wsUrl } from "@/lib/api";
 
 const AuthContext = createContext(null);
@@ -25,6 +25,11 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     (async () => {
       setLoading(true);
+      // If we're returning from Google OAuth, let AuthCallback handle the exchange first
+      if (window.location.hash?.includes("session_id=")) {
+        setLoading(false);
+        return;
+      }
       if (token) await fetchMe();
       setLoading(false);
     })();
@@ -73,8 +78,13 @@ export function AuthProvider({ children }) {
     setUser(null);
   };
 
+  const value = useMemo(
+    () => ({ token, user, setUser, loading, login, logout, refreshUser: fetchMe, subscribe }),
+    [token, user, loading, fetchMe, subscribe]
+  );
+
   return (
-    <AuthContext.Provider value={{ token, user, setUser, loading, login, logout, refreshUser: fetchMe, subscribe }}>
+    <AuthContext.Provider value={value}>
       {children}
     </AuthContext.Provider>
   );

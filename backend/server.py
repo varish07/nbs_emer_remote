@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect, UploadFile, File, Response, Query, Header
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect, UploadFile, File, Response, Query, Header, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -6,16 +6,16 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 import math
-import random
+import secrets
 import json
 import jwt
 import requests
+import redis.asyncio as aioredis
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict
 import uuid
 from datetime import datetime, timezone, timedelta
-
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -35,6 +35,40 @@ TWILIO_ENABLED = bool(TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM)
 
 ADMIN_PHONES = {p.strip() for p in os.environ.get('ADMIN_PHONES', '').split(',') if p.strip()}
 
+# Redis cache (optional — falls back gracefully if unreachable)
+REDIS_URL = os.environ.get('REDIS_URL', '').strip()
+redis_client: Optional[aioredis.Redis] = None
+CACHE_TTL_BLOCKS = 300      # 5 min
+CACHE_TTL_FRIENDS = 120     # 2 min
+
+
+async def cache_get(key: str):
+    if not redis_client:
+        return None
+    try:
+        val = await redis_client.get(key)
+        return json.loads(val) if val else None
+    except Exception:
+        return None
+
+
+async def cache_set(key: str, value, ttl: int):
+    if not redis_client:
+        return
+    try:
+        await redis_client.set(key, json.dumps(value, default=str), ex=ttl)
+    except Exception:
+        pass
+
+
+async def cache_del(*keys: str):
+    if not redis_client or not keys:
+        return
+    try:
+        await redis_client.delete(*keys)
+    except Exception:
+        pass
+
 def is_admin(user: dict) -> bool:
     return user.get('phone', '') in ADMIN_PHONES
 
@@ -52,55 +86,89 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 
+# Constants for OTP security
+OTP_TTL_SECONDS = 600           # 10 minutes
+OTP_MAX_ATTEMPTS = 5            # brute-force lockout
+OTP_SEND_LIMIT_PER_PHONE = 3    # per window
+OTP_SEND_WINDOW = 600           # 10 minutes
+OTP_SEND_LIMIT_PER_IP = 10      # per window
+OTP_VERIFY_LIMIT_PER_IP = 20    # per window
+
+LOCATION_GRID_DECIMALS = 3  # ~110m precision — safety vs UX tradeoff
+
+
+async def rate_limit(key: str, limit: int, window: int) -> bool:
+    """Redis-based rate limiter. Returns True if allowed, False if exceeded.
+    Fails-open if Redis is unavailable so we don't lock out real users."""
+    if not redis_client:
+        return True
+    try:
+        count = await redis_client.incr(key)
+        if count == 1:
+            await redis_client.expire(key, window)
+        return count <= limit
+    except Exception:
+        return True
+
+
+def client_ip(request) -> str:
+    # Emergent proxy sets X-Forwarded-For
+    fwd = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    return fwd or (request.client.host if request.client else "unknown")
+
+
 # ============= Models =============
 
 class SendOtpRequest(BaseModel):
-    phone: str
+    phone: str = Field(..., min_length=6, max_length=20)
 
 class VerifyOtpRequest(BaseModel):
-    phone: str
-    otp: str
+    phone: str = Field(..., min_length=6, max_length=20)
+    otp: str = Field(..., min_length=4, max_length=8)
+
+class GoogleAuthExchangeRequest(BaseModel):
+    session_id: str = Field(..., min_length=8, max_length=200)
 
 class UpdateProfileRequest(BaseModel):
-    name: Optional[str] = None
-    email: Optional[str] = None
-    avatar: Optional[str] = None
-    bio: Optional[str] = None
-    going_to: Optional[str] = None
-    home_location: Optional[str] = None
+    name: Optional[str] = Field(None, max_length=60)
+    email: Optional[str] = Field(None, max_length=120)
+    avatar: Optional[str] = Field(None, max_length=500)
+    bio: Optional[str] = Field(None, max_length=500)
+    going_to: Optional[str] = Field(None, max_length=120)
+    home_location: Optional[str] = Field(None, max_length=120)
 
 class UpdateLocationRequest(BaseModel):
-    lat: float
-    lng: float
+    lat: float = Field(..., ge=-90, le=90)
+    lng: float = Field(..., ge=-180, le=180)
 
 class SetActiveRequest(BaseModel):
     is_active: bool
-    radius: Optional[int] = None
+    radius: Optional[int] = Field(None, ge=10, le=10000)
 
 class FriendRequestCreate(BaseModel):
-    to_user_id: str
+    to_user_id: str = Field(..., min_length=8, max_length=64)
 
 class FriendRequestRespond(BaseModel):
-    request_id: str
+    request_id: str = Field(..., min_length=8, max_length=64)
     accept: bool
 
 class MessageCreate(BaseModel):
-    to_user_id: str
-    text: str
+    to_user_id: str = Field(..., min_length=8, max_length=64)
+    text: str = Field(..., min_length=1, max_length=2000)
 
 class SupportRequest(BaseModel):
-    type: str
-    name: Optional[str] = None
-    email: Optional[str] = None
-    message: str
+    type: str = Field(..., max_length=40)
+    name: Optional[str] = Field(None, max_length=80)
+    email: Optional[str] = Field(None, max_length=120)
+    message: str = Field(..., min_length=1, max_length=2000)
 
 class BlockRequest(BaseModel):
-    user_id: str
+    user_id: str = Field(..., min_length=8, max_length=64)
 
 class ReportRequest(BaseModel):
-    user_id: str
-    reason: str
-    details: Optional[str] = None
+    user_id: str = Field(..., min_length=8, max_length=64)
+    reason: str = Field(..., min_length=1, max_length=120)
+    details: Optional[str] = Field(None, max_length=1000)
 
 
 # ============= Helpers =============
@@ -135,6 +203,33 @@ def haversine_m(lat1, lng1, lat2, lng2):
     return 2*R*math.asin(math.sqrt(a))
 
 def public_user(u: dict) -> dict:
+    """SAFE for exposing to other users. Never includes precise GPS."""
+    return {
+        "id": u.get("id"),
+        "name": u.get("name") or "User",
+        "phone": u.get("phone"),
+        "avatar": u.get("avatar"),
+        "bio": u.get("bio"),
+        "going_to": u.get("going_to"),
+        "home_location": u.get("home_location"),
+        "is_active": u.get("is_active", False),
+        # location intentionally omitted — see grid_location() for public map view
+    }
+
+
+def grid_location(loc: Optional[dict]) -> Optional[dict]:
+    """Rounds lat/lng to a ~110m grid to prevent stalking."""
+    if not loc:
+        return None
+    lat = loc.get("lat")
+    lng = loc.get("lng")
+    if lat is None or lng is None:
+        return None
+    return {"lat": round(float(lat), LOCATION_GRID_DECIMALS), "lng": round(float(lng), LOCATION_GRID_DECIMALS)}
+
+
+def self_user(u: dict) -> dict:
+    """Only for the authenticated caller's OWN profile — precise location included."""
     return {
         "id": u.get("id"),
         "name": u.get("name") or "User",
@@ -148,12 +243,34 @@ def public_user(u: dict) -> dict:
     }
 
 async def get_blocked_ids(user_id: str) -> set:
-    """Returns IDs blocked by user OR who blocked user (mutual hide)."""
+    """Returns IDs blocked by user OR who blocked user (mutual hide). Cached via Redis."""
+    cache_key = f"blocks:{user_id}"
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return set(cached)
     out = set()
     async for b in db.blocks.find({"blocker_id": user_id}, {"_id": 0, "blocked_id": 1}):
         out.add(b["blocked_id"])
     async for b in db.blocks.find({"blocked_id": user_id}, {"_id": 0, "blocker_id": 1}):
         out.add(b["blocker_id"])
+    await cache_set(cache_key, list(out), CACHE_TTL_BLOCKS)
+    return out
+
+
+async def get_friend_ids(user_id: str) -> set:
+    """Set of accepted-friend user IDs. Cached in Redis; invalidated on request accept/block."""
+    cache_key = f"friend_ids:{user_id}"
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return set(cached)
+    out = set()
+    async for r in db.friend_requests.find(
+        {"$or": [{"from_user_id": user_id}, {"to_user_id": user_id}], "status": "accepted"},
+        {"_id": 0, "from_user_id": 1, "to_user_id": 1},
+    ):
+        other = r["to_user_id"] if r["from_user_id"] == user_id else r["from_user_id"]
+        out.add(other)
+    await cache_set(cache_key, list(out), CACHE_TTL_FRIENDS)
     return out
 
 
@@ -274,19 +391,33 @@ manager = ConnectionManager()
 # ============= Auth Routes =============
 
 @api_router.post("/auth/send-otp")
-async def send_otp(req: SendOtpRequest):
+async def send_otp(req: SendOtpRequest, request: Request):
     phone = req.phone.strip()
     if len(phone) < 6:
         raise HTTPException(status_code=400, detail="Invalid phone number")
 
+    # Rate limiting: per-phone + per-IP
+    ip = client_ip(request)
+    if not await rate_limit(f"otp:send:phone:{phone}", OTP_SEND_LIMIT_PER_PHONE, OTP_SEND_WINDOW):
+        raise HTTPException(status_code=429, detail="Too many OTP requests for this number. Try again in 10 min.")
+    if not await rate_limit(f"otp:send:ip:{ip}", OTP_SEND_LIMIT_PER_IP, OTP_SEND_WINDOW):
+        raise HTTPException(status_code=429, detail="Too many OTP requests from your network. Try again later.")
+
     if TWILIO_ENABLED:
-        otp = f"{random.randint(0, 999999):06d}"
+        otp = f"{secrets.randbelow(1000000):06d}"
     else:
         otp = "123456"
 
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=OTP_TTL_SECONDS)
     await db.otps.update_one(
         {"phone": phone},
-        {"$set": {"phone": phone, "otp": otp, "created_at": now_iso()}},
+        {"$set": {
+            "phone": phone,
+            "otp": otp,
+            "created_at": now_iso(),
+            "expires_at": expires_at,
+            "attempts": 0,
+        }},
         upsert=True
     )
 
@@ -300,13 +431,43 @@ async def send_otp(req: SendOtpRequest):
         return {"success": True, "message": "OTP sent (mock). Use 123456 to verify.", "mock_otp": otp, "mock": True}
 
 @api_router.post("/auth/verify-otp")
-async def verify_otp(req: VerifyOtpRequest):
+async def verify_otp(req: VerifyOtpRequest, request: Request):
     phone = req.phone.strip()
+    ip = client_ip(request)
+    if not await rate_limit(f"otp:verify:ip:{ip}", OTP_VERIFY_LIMIT_PER_IP, OTP_SEND_WINDOW):
+        raise HTTPException(status_code=429, detail="Too many verification attempts. Try again later.")
+
     rec = await db.otps.find_one({"phone": phone}, {"_id": 0})
+
+    # Expiry check (both natural TTL + explicit field)
+    if rec and rec.get("expires_at"):
+        exp = rec["expires_at"]
+        if isinstance(exp, str):
+            exp = datetime.fromisoformat(exp)
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) > exp:
+            await db.otps.delete_one({"phone": phone})
+            raise HTTPException(status_code=400, detail="OTP expired, request a new one")
+
+    # Attempt lockout
+    if rec and rec.get("attempts", 0) >= OTP_MAX_ATTEMPTS:
+        await db.otps.delete_one({"phone": phone})
+        raise HTTPException(status_code=429, detail="Too many wrong attempts. Request a new OTP.")
+
+    valid = False
     if not TWILIO_ENABLED and req.otp == "123456":
-        pass
-    elif not rec or rec.get("otp") != req.otp:
+        valid = True
+    elif rec and rec.get("otp") == req.otp:
+        valid = True
+
+    if not valid:
+        if rec:
+            await db.otps.update_one({"phone": phone}, {"$inc": {"attempts": 1}})
         raise HTTPException(status_code=400, detail="Invalid OTP")
+
+    # Success: burn the OTP so it can't be reused
+    await db.otps.delete_one({"phone": phone})
 
     user = await db.users.find_one({"phone": phone}, {"_id": 0})
     if not user:
@@ -328,12 +489,184 @@ async def verify_otp(req: VerifyOtpRequest):
     return {"token": token, "user": public_user(user)}
 
 
+EMERGENT_AUTH_SESSION_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
+
+
+@api_router.post("/auth/google/exchange")
+async def google_auth_exchange(req: GoogleAuthExchangeRequest, request: Request):
+    """Exchange an Emergent OAuth session_id for our JWT.
+    REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH"""
+    ip = client_ip(request)
+    if not await rate_limit(f"gauth:ip:{ip}", 20, OTP_SEND_WINDOW):
+        raise HTTPException(status_code=429, detail="Too many auth attempts. Try again later.")
+
+    try:
+        resp = requests.get(
+            EMERGENT_AUTH_SESSION_URL,
+            headers={"X-Session-ID": req.session_id},
+            timeout=15,
+        )
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Emergent auth call failed: {e}")
+        raise HTTPException(status_code=502, detail="Auth provider unreachable")
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid or expired Google session")
+
+    data = resp.json()
+    email = (data.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Google session missing email")
+
+    name = data.get("name") or email.split("@")[0]
+    picture = data.get("picture")
+
+    # Upsert by email
+    user = await db.users.find_one({"email": email}, {"_id": 0})
+    if not user:
+        user = {
+            "id": str(uuid.uuid4()),
+            "phone": None,
+            "email": email,
+            "name": name,
+            "avatar": picture,
+            "bio": None,
+            "is_active": False,
+            "radius": 100,
+            "location": None,
+            "auth_provider": "google",
+            "created_at": now_iso(),
+        }
+        await db.users.insert_one(user.copy())
+    else:
+        # Refresh Google profile fields if user hasn't customized them
+        updates = {}
+        if not user.get("name") or user.get("name", "").startswith("User"):
+            updates["name"] = name
+        if not user.get("avatar") and picture:
+            updates["avatar"] = picture
+        if updates:
+            await db.users.update_one({"id": user["id"]}, {"$set": updates})
+            user.update(updates)
+
+    if user.get("is_banned"):
+        raise HTTPException(status_code=403, detail="Account suspended")
+
+    token = create_token(user["id"])
+    return {"token": token, "user": public_user(user)}
+
+
+# ============= Account Linking (attach other identifier to current session) =============
+
+@api_router.post("/users/me/link-phone/send-otp")
+async def link_phone_send_otp(req: SendOtpRequest, request: Request, user=Depends(get_current_user)):
+    """Start attaching a phone to the currently signed-in user (e.g. a Google user wants SMS login too)."""
+    phone = req.phone.strip()
+    if len(phone) < 6:
+        raise HTTPException(status_code=400, detail="Invalid phone number")
+
+    existing = await db.users.find_one({"phone": phone, "id": {"$ne": user["id"]}}, {"_id": 0, "id": 1})
+    if existing:
+        raise HTTPException(status_code=409, detail="Phone already linked to another account")
+
+    ip = client_ip(request)
+    if not await rate_limit(f"otp:send:phone:{phone}", OTP_SEND_LIMIT_PER_PHONE, OTP_SEND_WINDOW):
+        raise HTTPException(status_code=429, detail="Too many OTP requests for this number.")
+    if not await rate_limit(f"otp:send:ip:{ip}", OTP_SEND_LIMIT_PER_IP, OTP_SEND_WINDOW):
+        raise HTTPException(status_code=429, detail="Too many OTP requests from your network.")
+
+    if TWILIO_ENABLED:
+        otp = f"{secrets.randbelow(1000000):06d}"
+    else:
+        otp = "123456"
+
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=OTP_TTL_SECONDS)
+    await db.otps.update_one(
+        {"phone": phone},
+        {"$set": {"phone": phone, "otp": otp, "expires_at": expires_at, "attempts": 0, "link_user_id": user["id"], "created_at": now_iso()}},
+        upsert=True
+    )
+
+    if TWILIO_ENABLED:
+        if not send_sms_otp(phone, otp):
+            raise HTTPException(status_code=502, detail="Failed to send OTP via SMS")
+        return {"success": True, "mock": False}
+    return {"success": True, "mock": True, "mock_otp": otp}
+
+
+@api_router.post("/users/me/link-phone/verify")
+async def link_phone_verify(req: VerifyOtpRequest, user=Depends(get_current_user)):
+    phone = req.phone.strip()
+    rec = await db.otps.find_one({"phone": phone}, {"_id": 0})
+    if not rec or rec.get("link_user_id") != user["id"]:
+        raise HTTPException(status_code=400, detail="Verification session not found — please request a fresh OTP")
+
+    exp = rec.get("expires_at")
+    if isinstance(exp, str):
+        exp = datetime.fromisoformat(exp)
+    if exp and exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    if exp and datetime.now(timezone.utc) > exp:
+        await db.otps.delete_one({"phone": phone})
+        raise HTTPException(status_code=400, detail="OTP expired")
+
+    if rec.get("attempts", 0) >= OTP_MAX_ATTEMPTS:
+        await db.otps.delete_one({"phone": phone})
+        raise HTTPException(status_code=429, detail="Too many wrong attempts")
+
+    valid = (not TWILIO_ENABLED and req.otp == "123456") or (rec.get("otp") == req.otp)
+    if not valid:
+        await db.otps.update_one({"phone": phone}, {"$inc": {"attempts": 1}})
+        raise HTTPException(status_code=400, detail="Invalid OTP")
+
+    # Race check: someone else may have grabbed the phone in the meantime
+    existing = await db.users.find_one({"phone": phone, "id": {"$ne": user["id"]}}, {"_id": 0, "id": 1})
+    if existing:
+        await db.otps.delete_one({"phone": phone})
+        raise HTTPException(status_code=409, detail="Phone already linked to another account")
+
+    await db.users.update_one({"id": user["id"]}, {"$set": {"phone": phone}})
+    await db.otps.delete_one({"phone": phone})
+    updated = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    return {"success": True, "user": public_user(updated)}
+
+
+@api_router.post("/users/me/link-google")
+async def link_google(req: GoogleAuthExchangeRequest, request: Request, user=Depends(get_current_user)):
+    """Attach a Google email to the current user (e.g. an OTP user wants Google login too)."""
+    ip = client_ip(request)
+    if not await rate_limit(f"gauth:ip:{ip}", 20, OTP_SEND_WINDOW):
+        raise HTTPException(status_code=429, detail="Too many attempts. Try later.")
+    try:
+        resp = requests.get(EMERGENT_AUTH_SESSION_URL, headers={"X-Session-ID": req.session_id}, timeout=15)
+    except requests.exceptions.RequestException as e:
+        logger.error(f"link_google: {e}")
+        raise HTTPException(status_code=502, detail="Auth provider unreachable")
+    if resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid or expired Google session")
+    data = resp.json()
+    email = (data.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Google session missing email")
+
+    existing = await db.users.find_one({"email": email, "id": {"$ne": user["id"]}}, {"_id": 0, "id": 1})
+    if existing:
+        raise HTTPException(status_code=409, detail="This Google account is already linked to another NBS user")
+
+    updates = {"email": email}
+    if not user.get("avatar") and data.get("picture"):
+        updates["avatar"] = data["picture"]
+    await db.users.update_one({"id": user["id"]}, {"$set": updates})
+    updated = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    return {"success": True, "user": public_user(updated)}
+
+
 # ============= User Routes =============
 
 @api_router.get("/users/me")
 async def get_me(user=Depends(get_current_user)):
     user.pop("_id", None)
-    return {**public_user(user), "email": user.get("email"), "radius": user.get("radius", 100), "is_admin": is_admin(user), "home_location": user.get("home_location")}
+    return {**self_user(user), "email": user.get("email"), "radius": user.get("radius", 100), "is_admin": is_admin(user)}
 
 @api_router.put("/users/me")
 async def update_me(req: UpdateProfileRequest, user=Depends(get_current_user)):
@@ -341,7 +674,7 @@ async def update_me(req: UpdateProfileRequest, user=Depends(get_current_user)):
     if update:
         await db.users.update_one({"id": user["id"]}, {"$set": update})
     u = await db.users.find_one({"id": user["id"]}, {"_id": 0})
-    return {**public_user(u), "email": u.get("email"), "radius": u.get("radius", 100)}
+    return {**self_user(u), "email": u.get("email"), "radius": u.get("radius", 100)}
 
 @api_router.post("/users/me/avatar")
 async def upload_avatar(file: UploadFile = File(...), user=Depends(get_current_user)):
@@ -392,6 +725,47 @@ async def set_active(req: SetActiveRequest, user=Depends(get_current_user)):
     await db.users.update_one({"id": user["id"]}, {"$set": update})
     return {"success": True, **update}
 
+
+@api_router.get("/users/me/export")
+async def export_my_data(user=Depends(get_current_user)):
+    """GDPR / DPDPA style data export. Returns everything we hold on the caller."""
+    uid = user["id"]
+    me = await db.users.find_one({"id": uid}, {"_id": 0})
+    msgs = await db.messages.find({"$or": [{"from_user_id": uid}, {"to_user_id": uid}]}, {"_id": 0}).sort("created_at", 1).to_list(50000)
+    frs = await db.friend_requests.find({"$or": [{"from_user_id": uid}, {"to_user_id": uid}]}, {"_id": 0}).to_list(10000)
+    blocks_out = await db.blocks.find({"blocker_id": uid}, {"_id": 0}).to_list(10000)
+    blocks_in = await db.blocks.find({"blocked_id": uid}, {"_id": 0}).to_list(10000)
+    reports = await db.reports.find({"reporter_id": uid}, {"_id": 0}).to_list(10000)
+    tickets = await db.support_tickets.find({"user_id": uid}, {"_id": 0}).to_list(10000)
+    return {
+        "exported_at": now_iso(),
+        "profile": me,
+        "messages": msgs,
+        "friend_requests": frs,
+        "blocks_i_made": blocks_out,
+        "blocks_against_me": blocks_in,
+        "reports_i_filed": reports,
+        "support_tickets": tickets,
+    }
+
+
+@api_router.delete("/users/me")
+async def delete_my_account(user=Depends(get_current_user)):
+    """Permanently delete the caller's account and related data."""
+    uid = user["id"]
+    # Remove all traces
+    await db.messages.delete_many({"$or": [{"from_user_id": uid}, {"to_user_id": uid}]})
+    await db.friend_requests.delete_many({"$or": [{"from_user_id": uid}, {"to_user_id": uid}]})
+    await db.blocks.delete_many({"$or": [{"blocker_id": uid}, {"blocked_id": uid}]})
+    await db.reports.delete_many({"reporter_id": uid})
+    await db.support_tickets.delete_many({"user_id": uid})
+    await db.otps.delete_one({"phone": user.get("phone", "")})
+    await db.users.delete_one({"id": uid})
+    # Bust caches
+    await cache_del(f"blocks:{uid}", f"friends:{uid}")
+    logger.info(f"Account deleted: {uid}")
+    return {"success": True, "message": "Account and all data permanently deleted."}
+
 @api_router.get("/users/nearby")
 async def get_nearby(user=Depends(get_current_user)):
     me = await db.users.find_one({"id": user["id"]}, {"_id": 0})
@@ -400,6 +774,7 @@ async def get_nearby(user=Depends(get_current_user)):
     radius = me.get("radius", 100)
     my_loc = me["location"]
     blocked = await get_blocked_ids(user["id"])
+    friends = await get_friend_ids(user["id"])
 
     cursor = db.users.find({
         "id": {"$ne": me["id"], "$nin": list(blocked)},
@@ -414,7 +789,13 @@ async def get_nearby(user=Depends(get_current_user)):
             continue
         d = haversine_m(my_loc["lat"], my_loc["lng"], loc["lat"], loc["lng"])
         if d <= radius:
-            nearby.append({**public_user(u), "distance_m": round(d, 1)})
+            is_friend = u["id"] in friends
+            nearby.append({
+                **public_user(u),
+                "distance_m": round(d, 1),
+                "location": loc if is_friend else grid_location(loc),
+                "is_friend": is_friend,
+            })
     nearby.sort(key=lambda x: x["distance_m"])
     return {"users": nearby, "my_radius": radius}
 
@@ -422,6 +803,7 @@ async def get_nearby(user=Depends(get_current_user)):
 async def get_all_active(user=Depends(get_current_user)):
     me = await db.users.find_one({"id": user["id"]}, {"_id": 0})
     blocked = await get_blocked_ids(user["id"])
+    friends = await get_friend_ids(user["id"])
     my_loc = me.get("location") if me else None
 
     cursor = db.users.find({
@@ -432,8 +814,12 @@ async def get_all_active(user=Depends(get_current_user)):
     out = []
     async for u in cursor:
         item = public_user(u)
-        if my_loc and u.get("location"):
-            item["distance_m"] = round(haversine_m(my_loc["lat"], my_loc["lng"], u["location"]["lat"], u["location"]["lng"]), 1)
+        loc = u.get("location")
+        is_friend = u["id"] in friends
+        item["location"] = (loc if is_friend else grid_location(loc)) if loc else None
+        item["is_friend"] = is_friend
+        if my_loc and loc:
+            item["distance_m"] = round(haversine_m(my_loc["lat"], my_loc["lng"], loc["lat"], loc["lng"]), 1)
         else:
             item["distance_m"] = None
         out.append(item)
@@ -467,6 +853,7 @@ async def send_request(req: FriendRequestCreate, user=Depends(get_current_user))
     })
     if reverse:
         await db.friend_requests.update_one({"id": reverse["id"]}, {"$set": {"status": "accepted", "responded_at": now_iso()}})
+        await cache_del(f"friends:{user['id']}", f"friends:{req.to_user_id}", f"friend_ids:{user['id']}", f"friend_ids:{req.to_user_id}")
         return {"success": True, "status": "accepted", "auto_matched": True}
     rid = str(uuid.uuid4())
     doc = {
@@ -495,6 +882,10 @@ async def incoming_requests(user=Depends(get_current_user)):
 
 @api_router.get("/requests/friends")
 async def list_friends(user=Depends(get_current_user)):
+    cache_key = f"friends:{user['id']}"
+    cached = await cache_get(cache_key)
+    if cached is not None:
+        return {"friends": cached}
     blocked = await get_blocked_ids(user["id"])
     cursor = db.friend_requests.find({
         "$or": [
@@ -513,6 +904,7 @@ async def list_friends(user=Depends(get_current_user)):
         u = await db.users.find_one({"id": fid}, {"_id": 0})
         if u:
             friends.append(public_user(u))
+    await cache_set(cache_key, friends, CACHE_TTL_FRIENDS)
     return {"friends": friends}
 
 @api_router.post("/requests/respond")
@@ -522,6 +914,8 @@ async def respond_request(req: FriendRequestRespond, user=Depends(get_current_us
         raise HTTPException(status_code=404, detail="Request not found")
     new_status = "accepted" if req.accept else "rejected"
     await db.friend_requests.update_one({"id": req.request_id}, {"$set": {"status": new_status, "responded_at": now_iso()}})
+    if req.accept:
+        await cache_del(f"friends:{user['id']}", f"friends:{r['from_user_id']}", f"friend_ids:{user['id']}", f"friend_ids:{r['from_user_id']}")
     await manager.send_to(r["from_user_id"], {"type": "request_response", "status": new_status, "from_user_id": user["id"]})
     return {"success": True, "status": new_status}
 
@@ -601,11 +995,13 @@ async def block_user(req: BlockRequest, user=Depends(get_current_user)):
         "blocked_id": req.user_id,
         "created_at": now_iso(),
     })
+    await cache_del(f"blocks:{user['id']}", f"blocks:{req.user_id}", f"friends:{user['id']}", f"friends:{req.user_id}", f"friend_ids:{user['id']}", f"friend_ids:{req.user_id}")
     return {"success": True}
 
 @api_router.post("/unblock")
 async def unblock_user(req: BlockRequest, user=Depends(get_current_user)):
     await db.blocks.delete_one({"blocker_id": user["id"], "blocked_id": req.user_id})
+    await cache_del(f"blocks:{user['id']}", f"blocks:{req.user_id}", f"friends:{user['id']}", f"friends:{req.user_id}", f"friend_ids:{user['id']}", f"friend_ids:{req.user_id}")
     return {"success": True}
 
 @api_router.get("/block/list")
@@ -647,6 +1043,7 @@ async def get_matches(user=Depends(get_current_user)):
     if not my_words:
         return {"matches": []}
     blocked = await get_blocked_ids(user["id"])
+    friends = await get_friend_ids(user["id"])
     out = []
     async for u in db.users.find({"id": {"$ne": user["id"], "$nin": list(blocked)}, "is_active": True}, {"_id": 0}):
         their_going = (u.get("going_to") or "").lower().strip()
@@ -658,6 +1055,10 @@ async def get_matches(user=Depends(get_current_user)):
             item = public_user(u)
             item["match_score"] = len(overlap)
             item["matched_on"] = list(overlap)
+            is_friend = u["id"] in friends
+            loc = u.get("location")
+            item["location"] = (loc if is_friend else grid_location(loc)) if loc else None
+            item["is_friend"] = is_friend
             if me.get("location") and u.get("location"):
                 item["distance_m"] = round(haversine_m(me["location"]["lat"], me["location"]["lng"], u["location"]["lat"], u["location"]["lng"]), 1)
             out.append(item)
@@ -677,15 +1078,15 @@ async def admin_list_reports(status: Optional[str] = None, user=Depends(require_
     q = {}
     if status:
         q["status"] = status
-    out = []
-    async for r in db.reports.find(q, {"_id": 0}).sort("created_at", -1).limit(200):
-        reporter = await db.users.find_one({"id": r["reporter_id"]}, {"_id": 0})
-        reported = await db.users.find_one({"id": r["reported_id"]}, {"_id": 0})
-        out.append({
-            **r,
-            "reporter": public_user(reporter) if reporter else None,
-            "reported": public_user(reported) if reported else None,
-        })
+    reports = await db.reports.find(q, {"_id": 0}).sort("created_at", -1).limit(200).to_list(200)
+    user_ids = {r.get("reporter_id") for r in reports} | {r.get("reported_id") for r in reports}
+    user_ids.discard(None)
+    users_map = {u["id"]: public_user(u) async for u in db.users.find({"id": {"$in": list(user_ids)}}, {"_id": 0})}
+    out = [{
+        **r,
+        "reporter": users_map.get(r.get("reporter_id")),
+        "reported": users_map.get(r.get("reported_id")),
+    } for r in reports]
     return {"reports": out}
 
 @api_router.post("/admin/reports/{report_id}/resolve")
@@ -738,14 +1139,19 @@ async def admin_list_chats(user=Depends(require_admin)):
         {"$sort": {"last_at": -1}},
         {"$limit": 200},
     ]
+    rows = await db.messages.aggregate(pipeline).to_list(200)
+    # Collect all participant IDs and hydrate in ONE query
+    user_ids = set()
+    for row in rows:
+        for pid in row["_id"].split("|"):
+            user_ids.add(pid)
+    users_map = {u["id"]: public_user(u) async for u in db.users.find({"id": {"$in": list(user_ids)}}, {"_id": 0})}
     chats = []
-    async for row in db.messages.aggregate(pipeline):
+    for row in rows:
         parts = row["_id"].split("|")
-        u1 = await db.users.find_one({"id": parts[0]}, {"_id": 0}) if len(parts) > 0 else None
-        u2 = await db.users.find_one({"id": parts[1]}, {"_id": 0}) if len(parts) > 1 else None
         chats.append({
             "chat_key": row["_id"],
-            "participants": [public_user(u1) if u1 else None, public_user(u2) if u2 else None],
+            "participants": [users_map.get(parts[0]), users_map.get(parts[1]) if len(parts) > 1 else None],
             "last_message": row["last_message"],
             "last_from": row["last_from"],
             "last_at": row["last_at"],
@@ -808,25 +1214,25 @@ async def admin_export_chat_csv(chat_key: str, user=Depends(require_admin)):
 
 @api_router.get("/admin/blocks")
 async def admin_list_blocks(user=Depends(require_admin)):
-    out = []
-    async for b in db.blocks.find({}, {"_id": 0}).sort("created_at", -1).limit(500):
-        blocker = await db.users.find_one({"id": b["blocker_id"]}, {"_id": 0})
-        blocked = await db.users.find_one({"id": b["blocked_id"]}, {"_id": 0})
-        out.append({
-            "id": b["id"],
-            "created_at": b.get("created_at"),
-            "blocker": public_user(blocker) if blocker else {"id": b["blocker_id"], "name": "?"},
-            "blocked": public_user(blocked) if blocked else {"id": b["blocked_id"], "name": "?"},
-        })
+    rows = await db.blocks.find({}, {"_id": 0}).sort("created_at", -1).limit(500).to_list(500)
+    user_ids = {b["blocker_id"] for b in rows} | {b["blocked_id"] for b in rows}
+    users_map = {u["id"]: public_user(u) async for u in db.users.find({"id": {"$in": list(user_ids)}}, {"_id": 0})}
+    out = [{
+        "id": b["id"],
+        "created_at": b.get("created_at"),
+        "blocker": users_map.get(b["blocker_id"], {"id": b["blocker_id"], "name": "?"}),
+        "blocked": users_map.get(b["blocked_id"], {"id": b["blocked_id"], "name": "?"}),
+    } for b in rows]
     return {"blocks": out}
 
 
 @api_router.get("/admin/support")
 async def admin_list_support(user=Depends(require_admin)):
-    out = []
-    async for t in db.support_tickets.find({}, {"_id": 0}).sort("created_at", -1).limit(500):
-        author = await db.users.find_one({"id": t.get("user_id")}, {"_id": 0})
-        out.append({**t, "author": public_user(author) if author else None})
+    tickets = await db.support_tickets.find({}, {"_id": 0}).sort("created_at", -1).limit(500).to_list(500)
+    user_ids = {t.get("user_id") for t in tickets}
+    user_ids.discard(None)
+    users_map = {u["id"]: public_user(u) async for u in db.users.find({"id": {"$in": list(user_ids)}}, {"_id": 0})}
+    out = [{**t, "author": users_map.get(t.get("user_id"))} for t in tickets]
     return {"tickets": out}
 
 
@@ -911,7 +1317,64 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup():
+    global redis_client
     init_storage()
+    await ensure_indexes()
+    if REDIS_URL:
+        try:
+            redis_client = aioredis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
+            await redis_client.ping()
+            logger.info(f"Redis connected: {REDIS_URL}")
+        except Exception as e:
+            logger.warning(f"Redis unavailable ({e}); caching disabled")
+            redis_client = None
+
+
+async def ensure_indexes():
+    """Create indexes for hot query paths. Idempotent — safe to run every boot."""
+    try:
+        # users: lookups by id (everywhere) and phone/email (auth), plus filter on is_active
+        await db.users.create_index("id", unique=True)
+        # Drop the old non-sparse phone index if it exists, then create sparse-unique
+        try:
+            await db.users.drop_index("phone_1")
+        except Exception:
+            pass
+        await db.users.create_index("phone", unique=True, sparse=True)
+        await db.users.create_index("email", unique=True, sparse=True)
+        await db.users.create_index("is_active")
+
+        # otps: keyed by phone (upserted on send-otp); TTL index auto-expires records
+        await db.otps.create_index("phone", unique=True)
+        await db.otps.create_index("expires_at", expireAfterSeconds=0)
+
+        # friend_requests: multiple hot lookups
+        await db.friend_requests.create_index("id", unique=True)
+        await db.friend_requests.create_index([("from_user_id", 1), ("to_user_id", 1), ("status", 1)])
+        await db.friend_requests.create_index([("to_user_id", 1), ("status", 1)])
+        await db.friend_requests.create_index([("from_user_id", 1), ("status", 1)])
+
+        # messages: fetched by chat_key, sorted by created_at
+        await db.messages.create_index("id", unique=True)
+        await db.messages.create_index([("chat_key", 1), ("created_at", 1)])
+        await db.messages.create_index("created_at")  # for admin recent-messages
+
+        # blocks: both directions queried
+        await db.blocks.create_index([("blocker_id", 1), ("blocked_id", 1)], unique=True)
+        await db.blocks.create_index("blocked_id")
+
+        # reports: admin listing sorted by created_at, filtered by status
+        await db.reports.create_index([("status", 1), ("created_at", -1)])
+
+        # files: served by storage_path with is_deleted filter
+        await db.files.create_index([("storage_path", 1), ("is_deleted", 1)])
+
+        # support_tickets: admin listing sorted by created_at
+        await db.support_tickets.create_index("created_at")
+
+        logger.info("MongoDB indexes ensured")
+    except Exception as e:
+        logger.error(f"ensure_indexes failed: {e}")
 
 
 @app.on_event("shutdown")

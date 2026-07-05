@@ -20,7 +20,7 @@ export default function MobileShell({ children }) {
     try {
       const { data } = await api.get("/requests/incoming");
       setRequestsCount(data.requests?.length || 0);
-    } catch { /* ignore */ }
+    } catch (err) { console.error("Failed to load requests badge:", err); }
   };
 
   useEffect(() => { loadBadge(); }, [loc.pathname]);
